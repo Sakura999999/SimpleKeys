@@ -353,6 +353,8 @@ export const cartApi = {
 // ============================================================
 
 export const orderApi = {
+  quote: (data: SettlementQuoteRequest) =>
+    request<SettlementQuote>("/orders/quote", { method: "POST", body: JSON.stringify(data) }),
   create: (data: CreateOrderRequest) =>
     request<CreateOrderResult>("/orders", { method: "POST", body: JSON.stringify(data) }),
   createFromCart: (data: CreateCartOrderRequest) =>

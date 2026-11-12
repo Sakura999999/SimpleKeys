@@ -302,6 +302,7 @@ export interface SiteConfigKV {
 // ============================================================
 
 export interface CreateOrderRequest {
+  quote_token: string
   product_id: string
   spec_id: string | null
   quantity: number
@@ -313,6 +314,7 @@ export interface CreateOrderRequest {
 }
 
 export interface CreateCartOrderRequest {
+  quote_token: string
   email: string
   payment_method: string
   use_points?: boolean
