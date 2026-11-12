@@ -1,0 +1,9 @@
+{
+  "name": "simplecard",
+  "private": true,
+  "scripts": {
+    "dev:web": "pnpm --filter @simplecard/web dev",
+    "build:web": "pnpm --filter @simplecard/web build",
+    "lint:web": "pnpm --filter @simplecard/web lint"
+  }
+}
