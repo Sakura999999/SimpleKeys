@@ -73,10 +73,10 @@ public class PaymentServiceImpl implements PaymentService {
         // 4. 按 providerType 路由到不同的支付实现
         String providerType = channel.getProviderType();
         switch (providerType) {
-            case "epay" -> createEpayPayment(channel, order, paymentMethod, amount, device);
+            case "epay" -> createEpayPayment(channel, order, paymentMethod, order.getActualAmount(), device);
             case "native_alipay" -> throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "原生支付宝支付尚未实现，请使用易支付渠道");
             case "native_wxpay" -> throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "原生微信支付尚未实现，请使用易支付渠道");
-            case "usdt" -> createBepusdtPayment(channel, order, amount);
+            case "usdt" -> createBepusdtPayment(channel, order, order.getPaymentAmount() != null ? order.getPaymentAmount() : order.getActualAmount());
             default -> throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "不支持的支付提供商类型: " + providerType);
         }
 
@@ -88,6 +88,9 @@ public class PaymentServiceImpl implements PaymentService {
      */
     private void createBepusdtPayment(PaymentChannel channel, Order order, BigDecimal amount) {
         BepusdtConfig config = buildBepusdtConfig(channel);
+        if (order.getPaymentCurrency() != null) {
+            config = new BepusdtConfig(config.apiUrl(),config.apiToken(),config.notifyUrl(),config.redirectUrl(),config.tradeType(),order.getPaymentCurrency(),config.timeout(),config.fixedRate());
+        }
         String productName = buildProductName(order.getId());
 
         BepusdtPaymentResult result = bepusdtService.createPayment(
@@ -174,6 +177,10 @@ public class PaymentServiceImpl implements PaymentService {
         result.put("qrcode_url", order.getQrcodeUrl());
         result.put("pay_url", order.getPaymentUrl());
         result.put("expires_at", order.getExpiresAt());
+        result.put("settlement_currency", "CNY");
+        result.put("settlement_amount",order.getActualAmount());
+        result.put("payment_currency",order.getPaymentCurrency());
+        result.put("payment_amount",order.getPaymentAmount());
 
         // USDT 支付额外字段
         if (order.getUsdtWalletAddress() != null) {

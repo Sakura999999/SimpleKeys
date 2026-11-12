@@ -10,6 +10,7 @@ import { mockCreateOrder } from "@/lib/mock-data"
 import { Turnstile, useTurnstile } from "@/components/shared/turnstile"
 import { cn, validateEmail, generateIdempotencyKey, getCurrencySymbol, detectPaymentDevice, isMobileDevice } from "@/lib/utils"
 import { PaymentSelector } from "@/components/shared/payment-selector"
+import { localizeProduct } from "@/lib/product-locale"
 import type { ProductDetail, ProductSpec, PaymentChannelItem } from "@/types"
 
 interface ProductActionsProps {
@@ -17,8 +18,9 @@ interface ProductActionsProps {
   channels: PaymentChannelItem[]
 }
 
-export function ProductActions({ product, channels }: ProductActionsProps) {
-  const { t } = useLocale()
+export function ProductActions({ product: sourceProduct, channels }: ProductActionsProps) {
+  const { t, locale } = useLocale()
+  const product = localizeProduct(sourceProduct, locale)
   const { isLoggedIn } = useAuth()
   const { addItem } = useCart()
   const router = useRouter()

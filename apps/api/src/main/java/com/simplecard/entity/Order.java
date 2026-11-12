@@ -40,6 +40,12 @@ public class Order extends BaseEntity {
 
     private String paymentMethod;
 
+    /** All new order totals are CNY. Gateway fiat is snapshotted independently. */
+    private String settlementCurrency;
+    private String paymentCurrency;
+    @Column(precision = 10, scale = 2)
+    private BigDecimal paymentAmount;
+
     private int pointsDeducted = 0;
 
     @Column(precision = 10, scale = 2)

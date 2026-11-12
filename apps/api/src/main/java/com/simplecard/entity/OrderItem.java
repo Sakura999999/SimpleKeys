@@ -38,4 +38,10 @@ public class OrderItem extends BaseEntity {
 
     @Column(nullable = false, precision = 10, scale = 2)
     private BigDecimal subtotal;
+
+    private String sourceCurrency;
+    @Column(precision = 10, scale = 2)
+    private BigDecimal sourceUnitPrice;
+    @Column(precision = 18, scale = 8)
+    private BigDecimal exchangeRate;
 }

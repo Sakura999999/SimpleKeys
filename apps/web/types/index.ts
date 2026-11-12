@@ -85,7 +85,9 @@ export interface WholesaleRule {
 export interface ProductCard {
   id: string
   title: string
+  title_en?: string | null
   description?: string
+  description_en?: string | null
   cover_url?: string
   base_price: number
   currency?: string
@@ -103,6 +105,7 @@ export interface ProductCard {
 /** Full product detail (returned by GET /products/{id}) */
 export interface ProductDetail extends ProductCard {
   detail_md?: string
+  detail_md_en?: string | null
   specs: ProductSpec[]
   spec_enabled?: boolean
   wholesale_enabled: boolean

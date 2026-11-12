@@ -57,6 +57,9 @@ export default function AdminProductsPage() {
     title: "",
     description: "",
     detail_md: "",
+    title_en: "",
+    description_en: "",
+    detail_md_en: "",
     category_id: "",
     base_price: "",
     currency: "CNY",
@@ -149,6 +152,9 @@ export default function AdminProductsPage() {
       title: product.title,
       description: product.description || "",
       detail_md: product.detail_md || "",
+      title_en: product.title_en || "",
+      description_en: product.description_en || "",
+      detail_md_en: product.detail_md_en || "",
       category_id: product.category_id,
       base_price: String(product.base_price),
       currency: product.currency || "CNY",
@@ -249,8 +255,11 @@ export default function AdminProductsPage() {
 
       const payload = {
         title: formData.title,
-        description: formData.description || undefined,
-        detail_md: formData.detail_md || undefined,
+        description: formData.description,
+        detail_md: formData.detail_md,
+        title_en: formData.title_en.trim(),
+        description_en: formData.description_en.trim(),
+        detail_md_en: formData.detail_md_en.trim(),
         category_id: formData.category_id,
         base_price: basePrice,
         currency: formData.currency,
@@ -266,16 +275,10 @@ export default function AdminProductsPage() {
 
       let productId: string
       if (editingProduct) {
-        await withMockFallback(
-          () => adminProductApi.update(editingProduct.id, payload),
-          () => null
-        )
+        await adminProductApi.update(editingProduct.id, payload)
         productId = editingProduct.id
       } else {
-        const created = await withMockFallback(
-          () => adminProductApi.create(payload),
-          () => ({ id: "mock-id" } as ProductDetail)
-        )
+        const created = await adminProductApi.create(payload)
         productId = created.id
       }
 
@@ -322,7 +325,7 @@ export default function AdminProductsPage() {
   const handleCloseModal = () => {
     setShowModal(false)
     setEditingProduct(null)
-    setFormData({ title: "", description: "", detail_md: "", category_id: "", base_price: "", currency: "CNY", cover_url: "", low_stock_threshold: "10", wholesale_enabled: false, is_enabled: true, initial_sales: "", sort_order: "", delivery_type: "AUTO" })
+    setFormData({ title: "", description: "", detail_md: "", title_en: "", description_en: "", detail_md_en: "", category_id: "", base_price: "", currency: "CNY", cover_url: "", low_stock_threshold: "10", wholesale_enabled: false, is_enabled: true, initial_sales: "", sort_order: "", delivery_type: "AUTO" })
     setFormSpecs([])
     setSpecsEnabled(false)
     setSpecDeleteConfirm(null)
@@ -536,6 +539,19 @@ export default function AdminProductsPage() {
                 <label className="text-sm font-medium text-foreground">{t("admin.productBrief")}</label>
                 <input type="text" className="h-10 rounded-lg border border-input bg-background px-3 text-sm text-foreground focus:outline-none focus:ring-2 focus:ring-ring" placeholder="简短描述商品特点" value={formData.description} onChange={(e) => setFormData({ ...formData, description: e.target.value })} />
               </div>
+              <fieldset className="flex flex-col gap-4 rounded-xl border border-border bg-muted/20 p-4">
+                <legend className="px-1 text-sm font-semibold">英文内容（可选）</legend>
+                <p className="text-xs leading-5 text-muted-foreground">原有名称、简介和详情用于中文显示。切换到英文时显示以下内容；未填写的字段继续使用原文。</p>
+                <label className="flex flex-col gap-1.5 text-sm font-medium" htmlFor="product-title-en">英文商品名称
+                  <input id="product-title-en" lang="en" type="text" maxLength={255} className="h-10 rounded-lg border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" value={formData.title_en} onChange={e => setFormData({ ...formData, title_en: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1.5 text-sm font-medium" htmlFor="product-description-en">英文简介
+                  <textarea id="product-description-en" lang="en" rows={2} className="rounded-lg border border-input bg-background p-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" value={formData.description_en} onChange={e => setFormData({ ...formData, description_en: e.target.value })} />
+                </label>
+                <label className="flex flex-col gap-1.5 text-sm font-medium" htmlFor="product-detail-en">英文详情（支持 Markdown）
+                  <textarea id="product-detail-en" lang="en" rows={6} className="rounded-lg border border-input bg-background p-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring" value={formData.detail_md_en} onChange={e => setFormData({ ...formData, detail_md_en: e.target.value })} />
+                </label>
+              </fieldset>
               {/* 分类 + 货币类型 */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="flex flex-col gap-1.5">

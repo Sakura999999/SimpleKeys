@@ -4,8 +4,9 @@ import Link from "next/link"
 import { ArrowLeft } from "lucide-react"
 import { useLocale } from "@/lib/context"
 
-export function ProductBreadcrumb({ title }: { title: string }) {
-  const { t } = useLocale()
+export function ProductBreadcrumb({ title, titleEn }: { title: string; titleEn?: string | null }) {
+  const { t, locale } = useLocale()
+  const displayTitle = locale === "en" ? titleEn?.trim() || title : title
 
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -17,7 +18,7 @@ export function ProductBreadcrumb({ title }: { title: string }) {
         {t("common.back")}
       </Link>
       <span>/</span>
-      <span className="truncate max-w-[200px] sm:max-w-none">{title}</span>
+      <span className="truncate max-w-[200px] sm:max-w-none">{displayTitle}</span>
     </div>
   )
 }

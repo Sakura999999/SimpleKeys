@@ -20,6 +20,14 @@ public class Product extends BaseEntity {
     @Column(nullable = false)
     private String title;
 
+    private String titleEn;
+
+    @Column(columnDefinition = "TEXT")
+    private String descriptionEn;
+
+    @Column(columnDefinition = "TEXT")
+    private String detailMdEn;
+
     @Column(columnDefinition = "TEXT")
     private String description;
 

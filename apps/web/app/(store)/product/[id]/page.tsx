@@ -88,7 +88,7 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
       />
 
       {/* Breadcrumb */}
-      <ProductBreadcrumb title={product.title} />
+      <ProductBreadcrumb title={product.title} titleEn={product.title_en} />
 
       <div className="grid gap-6 lg:grid-cols-5">
         {/* Left: Image — server rendered */}

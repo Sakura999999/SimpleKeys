@@ -8,6 +8,7 @@ import com.simplecard.entity.*;
 import com.simplecard.exception.BusinessException;
 import com.simplecard.repository.*;
 import com.simplecard.service.OrderService;
+import com.simplecard.service.SettlementService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -33,6 +34,53 @@ public class OrderServiceImpl implements OrderService {
     private final CardKeyRepository cardKeyRepository;
     private final SiteConfigRepository siteConfigRepository;
     private final PaymentChannelRepository paymentChannelRepository;
+    private final SettlementService settlementService;
+
+    @Override
+    @Transactional(readOnly = true)
+    public SettlementService.Quote quote(Map<String,Object> request, UUID userId, String sessionToken) {
+        String method = optionalString(request,"payment_method");
+        if (Boolean.TRUE.equals(request.get("from_cart"))) return quoteCart(loadCart(userId,sessionToken),method);
+        UUID id = requireUuid(request,"product_id");
+        UUID specId = optionalUuid(request,"spec_id");
+        int quantity = requireInt(request,"quantity");
+        Product product = loadProduct(id);
+        return settlementService.quote(List.of(source(id.toString(),product,specId,quantity)),method);
+    }
+
+    private Product loadProduct(UUID id) {
+        return productRepository.findById(id).filter(p -> p.getIsDeleted()==0 && p.isEnabled())
+                .orElseThrow(() -> new BusinessException(ErrorCode.PRODUCT_NOT_FOUND,"商品不存在或已下架"));
+    }
+
+    private List<CartItem> loadCart(UUID userId, String sessionToken) {
+        if (userId != null) return cartItemRepository.findByUserId(userId);
+        if (sessionToken != null) return cartItemRepository.findBySessionToken(sessionToken);
+        return List.of();
+    }
+
+    private SettlementService.Source source(String key, Product product, UUID specId, int quantity) {
+        if (quantity < 1 || quantity > getMaxPurchasePerUser()) throw new BusinessException(ErrorCode.BAD_REQUEST,"购买数量无效");
+        validateSpecConsistency(product,specId);
+        return new SettlementService.Source(key,product.getId(),specId,product.getTitle(),product.getCurrency(),quantity,getUnitPrice(product,specId,quantity));
+    }
+
+    private SettlementService.Quote quoteCart(List<CartItem> cart, String method) {
+        return settlementService.quote(cart.stream().map(item -> source(item.getId().toString(),loadProduct(item.getProductId()),item.getSpecId(),item.getQuantity())).toList(),method);
+    }
+
+    private void checkQuote(Map<String,Object> request, SettlementService.Quote quote) {
+        if (!quote.quoteToken().equals(optionalString(request,"quote_token")))
+            throw new BusinessException(ErrorCode.BAD_REQUEST,"价格、汇率或购物车内容已变化，请刷新结算金额后重新确认");
+    }
+
+    private void snapshot(Order order, SettlementService.Quote quote) {
+        order.setSettlementCurrency("CNY"); order.setPaymentCurrency(quote.paymentCurrency()); order.setPaymentAmount(quote.paymentAmount());
+    }
+
+    private void snapshot(OrderItem item, SettlementService.Line line) {
+        item.setSourceCurrency(line.sourceCurrency()); item.setSourceUnitPrice(line.sourceUnitPrice()); item.setExchangeRate(line.exchangeRate());
+    }
 
     @Override
     @Transactional
@@ -88,7 +136,10 @@ public class OrderServiceImpl implements OrderService {
                     Map.of("available", available));
         }
 
-        BigDecimal unitPrice = getUnitPrice(product, specId, quantity);
+        var priceQuote = settlementService.quote(List.of(source(productId.toString(),product,specId,quantity)),paymentMethod);
+        checkQuote(req,priceQuote);
+        var priceLine = priceQuote.items().getFirst();
+        BigDecimal unitPrice = priceLine.unitPrice();
         BigDecimal totalAmount = unitPrice.multiply(BigDecimal.valueOf(quantity));
         if (totalAmount.compareTo(BigDecimal.ZERO) <= 0) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "订单金额异常，请联系客服");
@@ -99,6 +150,7 @@ public class OrderServiceImpl implements OrderService {
         order.setUserId(userId);
         order.setEmail(email);
         order.setTotalAmount(totalAmount);
+        snapshot(order,priceQuote);
         order.setActualAmount(totalAmount);
         order.setStatus(OrderStatus.PENDING);
         order.setOrderType(OrderType.DIRECT);
@@ -124,6 +176,7 @@ public class OrderServiceImpl implements OrderService {
         item.setQuantity(quantity);
         item.setUnitPrice(unitPrice);
         item.setSubtotal(totalAmount);
+        snapshot(item,priceLine);
         orderItemRepository.save(item);
 
         return buildOrderResult(order, device);
@@ -178,12 +231,15 @@ public class OrderServiceImpl implements OrderService {
 
         int expireMinutes = getConfigInt("order_expire_minutes", 15);
         BigDecimal totalAmount = BigDecimal.ZERO;
+        var priceQuote = quoteCart(cartItems,paymentMethod);
+        checkQuote(req,priceQuote);
 
         Order order = new Order();
         order.setUserId(userId);
         order.setEmail(email);
         order.setStatus(OrderStatus.PENDING);
         order.setOrderType(OrderType.CART);
+        snapshot(order,priceQuote);
         order.setPaymentMethod(paymentMethod);
         order.setExpiresAt(LocalDateTime.now().plusMinutes(expireMinutes));
         order.setIdempotencyKey(idempotencyKey);
@@ -214,7 +270,8 @@ public class OrderServiceImpl implements OrderService {
                         Map.of("available", available, "title", product.getTitle()));
             }
 
-            BigDecimal unitPrice = getUnitPrice(product, ci.getSpecId(), ci.getQuantity());
+            var priceLine = priceQuote.items().stream().filter(line -> line.key().equals(ci.getId().toString())).findFirst().orElseThrow();
+            BigDecimal unitPrice = priceLine.unitPrice();
             BigDecimal subtotal = unitPrice.multiply(BigDecimal.valueOf(ci.getQuantity()));
             totalAmount = totalAmount.add(subtotal);
 
@@ -233,6 +290,7 @@ public class OrderServiceImpl implements OrderService {
             item.setQuantity(ci.getQuantity());
             item.setUnitPrice(unitPrice);
             item.setSubtotal(subtotal);
+            snapshot(item,priceLine);
             orderItemRepository.save(item);
         }
 
@@ -391,6 +449,9 @@ public class OrderServiceImpl implements OrderService {
         map.put("id", o.getId());
         map.put("total_amount", o.getTotalAmount());
         map.put("actual_amount", o.getActualAmount());
+        map.put("currency", "CNY");
+        map.put("payment_currency",o.getPaymentCurrency());
+        map.put("payment_amount",o.getPaymentAmount());
         map.put("status", o.getStatus().name());
         map.put("order_type", o.getOrderType().name());
         map.put("payment_method", o.getPaymentMethod());
@@ -410,6 +471,9 @@ public class OrderServiceImpl implements OrderService {
             im.put("quantity", i.getQuantity());
             im.put("unit_price", i.getUnitPrice());
             im.put("subtotal", i.getSubtotal());
+            im.put("source_currency",i.getSourceCurrency());
+            im.put("source_unit_price",i.getSourceUnitPrice());
+            im.put("exchange_rate",i.getExchangeRate());
             return im;
         }).toList());
         return map;

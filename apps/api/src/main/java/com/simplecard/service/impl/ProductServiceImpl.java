@@ -101,6 +101,9 @@ public class ProductServiceImpl implements ProductService {
     public Map<String, Object> createProduct(Map<String, Object> req) {
         Product product = new Product();
         product.setTitle((String) req.get("title"));
+        product.setTitleEn((String) req.get("title_en"));
+        product.setDescriptionEn((String) req.get("description_en"));
+        product.setDetailMdEn((String) req.get("detail_md_en"));
         product.setDescription((String) req.get("description"));
         product.setDetailMd((String) req.get("detail_md"));
         product.setCoverUrl((String) req.get("cover_url"));
@@ -125,6 +128,9 @@ public class ProductServiceImpl implements ProductService {
                 .filter(p -> p.getIsDeleted() == 0)
                 .orElseThrow(() -> new BusinessException(ErrorCode.PRODUCT_NOT_FOUND, "商品不存在"));
         if (req.containsKey("title")) product.setTitle((String) req.get("title"));
+        if (req.containsKey("title_en")) product.setTitleEn((String) req.get("title_en"));
+        if (req.containsKey("description_en")) product.setDescriptionEn((String) req.get("description_en"));
+        if (req.containsKey("detail_md_en")) product.setDetailMdEn((String) req.get("detail_md_en"));
         if (req.containsKey("description")) product.setDescription((String) req.get("description"));
         if (req.containsKey("detail_md")) product.setDetailMd((String) req.get("detail_md"));
         if (req.containsKey("cover_url")) product.setCoverUrl((String) req.get("cover_url"));
@@ -257,7 +263,9 @@ public class ProductServiceImpl implements ProductService {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put("id", p.getId());
         map.put("title", p.getTitle());
+        map.put("title_en", p.getTitleEn());
         map.put("description", p.getDescription());
+        map.put("description_en", p.getDescriptionEn());
         map.put("cover_url", p.getCoverUrl());
         map.put("base_price", p.getBasePrice());
         map.put("currency", p.getCurrency());
@@ -286,6 +294,7 @@ public class ProductServiceImpl implements ProductService {
     private Map<String, Object> toProductDetail(Product p) {
         Map<String, Object> map = new LinkedHashMap<>(toProductCard(p));
         map.put("detail_md", p.getDetailMd());
+        map.put("detail_md_en", p.getDetailMdEn());
         List<ProductSpec> specs = productSpecRepository.findByProductIdAndIsDeletedOrderBySortOrderAsc(p.getId(), 0);
         map.put("specs", specs.stream().map(this::toSpecMap).toList());
         map.put("spec_enabled", p.isSpecEnabled());

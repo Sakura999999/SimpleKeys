@@ -5,13 +5,15 @@ import { Zap, Package, AlertTriangle } from "lucide-react"
 import type { ProductCard as ProductCardType } from "@/types"
 import { useLocale } from "@/lib/context"
 import { cn, getCurrencySymbol } from "@/lib/utils"
+import { localizeProduct } from "@/lib/product-locale"
 
 interface ProductCardProps {
   product: ProductCardType
 }
 
-export function ProductCard({ product }: ProductCardProps) {
-  const { t } = useLocale()
+export function ProductCard({ product: sourceProduct }: ProductCardProps) {
+  const { t, locale } = useLocale()
+  const product = localizeProduct(sourceProduct, locale)
 
   const inStock = product.stock_available > 0
   const lowStock = product.stock_available > 0 && product.stock_available <= 10

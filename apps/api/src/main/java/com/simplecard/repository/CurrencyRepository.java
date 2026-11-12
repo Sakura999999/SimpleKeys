@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.UUID;
 
 public interface CurrencyRepository extends JpaRepository<Currency, UUID> {
+    java.util.Optional<Currency> findByCodeAndEnabled(String code, boolean enabled);
 
     List<Currency> findByEnabledOrderBySortOrderAsc(boolean enabled);
 }

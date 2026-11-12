@@ -3,9 +3,11 @@
 import ReactMarkdown from "react-markdown"
 import { useLocale } from "@/lib/context"
 import type { ProductDetail } from "@/types"
+import { localizeProduct } from "@/lib/product-locale"
 
-export function ProductDescription({ product }: { product: ProductDetail }) {
-  const { t } = useLocale()
+export function ProductDescription({ product: sourceProduct }: { product: ProductDetail }) {
+  const { t, locale } = useLocale()
+  const product = localizeProduct(sourceProduct, locale)
 
   return (
     <div className="mt-12">

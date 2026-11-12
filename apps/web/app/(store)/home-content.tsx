@@ -44,7 +44,7 @@ export function HomeContent({ products, categories, siteSlogan, siteDescription 
     }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase()
-      result = result.filter((p) => p.title.toLowerCase().includes(q))
+      result = result.filter((p) => p.title.toLowerCase().includes(q) || p.title_en?.toLowerCase().includes(q))
     }
     if (inStockOnly) {
       result = result.filter((p) => p.stock_available > 0)

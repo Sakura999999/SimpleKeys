@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.UUID;
 
 public interface OrderService {
+    SettlementService.Quote quote(Map<String,Object> request, UUID userId, String sessionToken);
 
     /**
      * 订单落库结果。

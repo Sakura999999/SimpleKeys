@@ -33,6 +33,12 @@ public class OrderController {
     private final com.simplecard.service.PaymentService paymentService;
     private final com.simplecard.config.ClientIpResolver clientIpResolver;
 
+    @PostMapping("/quote")
+    public ApiResponse<?> quote(@RequestBody Map<String,Object> request,
+                                @RequestHeader(value="X-Session-Token", required=false) String sessionToken) {
+        return ApiResponse.success(orderService.quote(request,RequestContext.getUserId(),sessionToken));
+    }
+
     @PostMapping
     public ApiResponse<?> createOrder(@RequestBody Map<String, Object> request,
                                       @RequestHeader(value = "X-Session-Token", required = false) String sessionToken,

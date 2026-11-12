@@ -14,6 +14,10 @@ import lombok.Setter;
 @Table(name = "currencies")
 public class Currency extends BaseEntity {
 
+    /** Administrator-maintained CNY per one unit; null means checkout is unavailable. */
+    @Column(precision = 18, scale = 8)
+    private java.math.BigDecimal rateToCny;
+
     @Column(nullable = false, unique = true, length = 10)
     private String code;
 

@@ -21,7 +21,7 @@ public interface ProductRepository extends JpaRepository<Product, UUID> {
     // 首页商品列表 — 带搜索词（keyword 保证非 null）
     @Query("SELECT p FROM Product p WHERE p.isDeleted = 0 AND p.enabled = true " +
             "AND (:categoryId IS NULL OR p.categoryId = :categoryId) " +
-            "AND LOWER(p.title) LIKE :keywordPattern")
+            "AND (LOWER(p.title) LIKE :keywordPattern OR LOWER(p.titleEn) LIKE :keywordPattern)")
     Page<Product> findPublicProductsByKeyword(@Param("categoryId") UUID categoryId,
                                               @Param("keywordPattern") String keywordPattern,
                                               Pageable pageable);
@@ -37,7 +37,7 @@ public interface ProductRepository extends JpaRepository<Product, UUID> {
     // 管理后台商品列表 — 带搜索词（keyword 保证非 null）
     @Query("SELECT p FROM Product p WHERE p.isDeleted = 0 " +
             "AND (:categoryId IS NULL OR p.categoryId = :categoryId) " +
-            "AND LOWER(p.title) LIKE :keywordPattern " +
+            "AND (LOWER(p.title) LIKE :keywordPattern OR LOWER(p.titleEn) LIKE :keywordPattern) " +
             "AND (:isEnabled IS NULL OR p.enabled = :isEnabled)")
     Page<Product> findAdminProductsByKeyword(@Param("categoryId") UUID categoryId,
                                              @Param("keywordPattern") String keywordPattern,
