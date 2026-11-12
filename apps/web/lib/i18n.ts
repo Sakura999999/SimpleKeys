@@ -301,6 +301,7 @@ const zh = {
   // Admin
   "admin.businessRecords": "业务管理",
   "admin.dashboard": "仪表盘",
+  "admin.exchangeRates": "汇率设置",
   "admin.products": "商品管理",
   "admin.categories": "分类管理",
   "admin.cardKeys": "卡密管理",
@@ -929,6 +930,7 @@ const en: Record<keyof typeof zh, string> = {
   // Admin
   "admin.businessRecords": "Business records",
   "admin.dashboard": "Dashboard",
+  "admin.exchangeRates": "Exchange rates",
   "admin.products": "Products",
   "admin.categories": "Categories",
   "admin.cardKeys": "Card Keys",

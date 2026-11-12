@@ -42,6 +42,22 @@ import type {
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "/api"
 
+export interface SettlementQuoteRequest {
+  product_id?: string; spec_id?: string | null; quantity?: number
+  from_cart?: boolean; payment_method?: string
+}
+export interface SettlementQuote {
+  quote_token: string; total_amount: number; settlement_currency: string
+  payment_currency: string; payment_amount: number
+  items: { key: string; product_id: string; title: string; source_currency: string; quantity: number;
+    source_unit_price: number; exchange_rate: number; unit_price: number; subtotal: number }[]
+}
+export interface ExchangeRate { code: string; name: string; rate_to_cny: number | null; updated_at: string | null }
+export const adminExchangeApi = {
+  list: () => request<ExchangeRate[]>("/admin/currencies"),
+  save: (rates: Record<string,string>) => request<null>("/admin/currencies/exchange-rates", { method: "PUT", body: JSON.stringify(rates) }),
+}
+
 // ============================================================
 // Error
 // ============================================================

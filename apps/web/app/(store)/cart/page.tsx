@@ -7,12 +7,14 @@ import { Trash2, Minus, Plus, ShoppingCart, ArrowRight, Package } from "lucide-r
 import { toast } from "sonner"
 import { useLocale, useCart } from "@/lib/context"
 import { getApiErrorMessage } from "@/services/api"
-import { cn } from "@/lib/utils"
+import { cn, getCurrencySymbol } from "@/lib/utils"
+import { useSettlementQuote } from "@/hooks/use-settlement-quote"
 
 export default function CartPage() {
   const { t } = useLocale()
   const router = useRouter()
   const { items, totalAmount, isLoading, updateItem, removeItem } = useCart()
+  const settlement = useSettlementQuote({ from_cart: true }, items.length > 0, JSON.stringify(items))
 
   const totalQty = useMemo(() => items.reduce((s, i) => s + i.quantity, 0), [items])
 
@@ -100,7 +102,7 @@ export default function CartPage() {
               )}
               <div className="flex items-center gap-3">
                 <span className="text-sm font-semibold text-foreground">
-                  {"\u00A5"}{item.unit_price.toFixed(2)}
+                  {getCurrencySymbol(item.currency)}{item.unit_price.toFixed(2)} {item.currency || "CNY"}
                 </span>
 
                 {/* Quantity Control */}
@@ -132,7 +134,7 @@ export default function CartPage() {
             {/* Subtotal & Remove */}
             <div className="flex flex-col items-end gap-2">
               <span className="text-sm font-bold text-foreground">
-                {"\u00A5"}{item.subtotal.toFixed(2)}
+                {getCurrencySymbol(item.currency)}{item.subtotal.toFixed(2)} {item.currency || "CNY"}
               </span>
               <button
                 onClick={() => handleRemoveItem(item.id)}
@@ -147,6 +149,7 @@ export default function CartPage() {
       </div>
 
       {/* Checkout Bar - fixed bottom */}
+      {settlement.error && <p role="alert" className="text-sm text-destructive">{settlement.error} <button className="underline" onClick={settlement.refresh}>重试</button></p>}
       <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-border bg-background/95 backdrop-blur-sm shadow-lg">
         <div className="container mx-auto flex items-center justify-between p-4">
           <div className="text-sm text-muted-foreground">
@@ -157,7 +160,7 @@ export default function CartPage() {
             <div className="text-right">
               <span className="text-sm text-muted-foreground">{t("cart.total")}:</span>
               <span className="ml-2 text-xl font-bold text-foreground">
-                {"\u00A5"}{totalAmount.toFixed(2)}
+                {settlement.quote ? `¥${settlement.quote.total_amount.toFixed(2)} CNY` : "—"}
               </span>
             </div>
             <button

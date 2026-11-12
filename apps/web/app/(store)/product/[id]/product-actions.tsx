@@ -5,8 +5,9 @@ import { useRouter } from "next/navigation"
 import { Zap, Minus, Plus, ShoppingCart, Package, TrendingUp } from "lucide-react"
 import { toast } from "sonner"
 import { useLocale, useAuth, useCart } from "@/lib/context"
-import { orderApi, withMockFallback, getApiErrorMessage, setTurnstileHeaders } from "@/services/api"
-import { mockCreateOrder } from "@/lib/mock-data"
+import { orderApi, getApiErrorMessage, setTurnstileHeaders } from "@/services/api"
+import { useSettlementQuote } from "@/hooks/use-settlement-quote"
+import { SettlementSummary } from "@/components/shared/settlement-summary"
 import { Turnstile, useTurnstile } from "@/components/shared/turnstile"
 import { cn, validateEmail, generateIdempotencyKey, getCurrencySymbol, detectPaymentDevice, isMobileDevice } from "@/lib/utils"
 import { PaymentSelector } from "@/components/shared/payment-selector"
@@ -42,6 +43,7 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
 
   const currentPrice = selectedSpec ? selectedSpec.price : product.base_price
   const totalPrice = currentPrice * quantity
+  const settlement = useSettlementQuote({ product_id: product.id, spec_id: selectedSpec?.id ?? null, quantity, payment_method: selectedPayment }, !!selectedPayment)
   const currentStock = selectedSpec?.stock_available ?? product.stock_available ?? 0
   const isOutOfStock = currentStock === 0
   const deliveryType = product.delivery_type === "MANUAL" ? "manual" : "auto"
@@ -56,6 +58,7 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
   }
 
   const handleBuyNow = async () => {
+    if (!settlement.quote) { toast.error(settlement.error || "请等待结算金额计算完成"); return }
     if (!email.trim()) {
       toast.error(t("product.emailRequired"))
       emailInputRef.current?.focus()
@@ -81,8 +84,8 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
     try {
       setTurnstileHeaders(turnstileToken)
       const device = detectPaymentDevice()
-      const result = await withMockFallback(
-        () => orderApi.create({
+      const result = await orderApi.create({
+          quote_token: settlement.quote.quote_token,
           product_id: product.id,
           spec_id: selectedSpec?.id ?? null,
           quantity,
@@ -90,9 +93,7 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
           payment_method: selectedPayment,
           idempotency_key: generateIdempotencyKey(),
           device,
-        }),
-        () => mockCreateOrder(email, selectedPayment)
-      )
+        })
       toast.success(t("checkout.processingOrder"))
       const payUrlH5 = result.payment.pay_url || ""
       const qr = result.payment.qrcode_url || result.payment.payment_url || ""
@@ -117,6 +118,7 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
       router.push(payUrl)
     } catch (err: unknown) {
       toast.error(getApiErrorMessage(err, t))
+      settlement.refresh()
       handleTurnstileReset()
     } finally {
       setSubmitting(false)
@@ -323,13 +325,14 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
           </div>
         </div>
 
+        {selectedPayment && <SettlementSummary {...settlement} retry={settlement.refresh} usdt={selectedPayment.startsWith("usdt_")} />}
         <Turnstile onSuccess={setTurnstileToken} onError={handleTurnstileReset} className="mb-3" />
 
         {/* Action Buttons */}
         <div className="flex gap-3">
           <button
             onClick={handleBuyNow}
-            disabled={submitting || isOutOfStock}
+            disabled={submitting || isOutOfStock || !settlement.quote}
             className="scheme-glow inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-lg bg-primary text-sm font-semibold text-primary-foreground transition-all hover:brightness-110 disabled:pointer-events-none disabled:opacity-50"
           >
             {submitting ? (

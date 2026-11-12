@@ -6,7 +6,8 @@ import { ShoppingBag, Mail, CreditCard, Lock } from "lucide-react"
 import { toast } from "sonner"
 import { useLocale, useCart } from "@/lib/context"
 import { orderApi, paymentApi, withMockFallback, getApiErrorMessage } from "@/services/api"
-import { mockPaymentChannels, mockCreateOrder } from "@/lib/mock-data"
+import { useSettlementQuote } from "@/hooks/use-settlement-quote"
+import { SettlementSummary } from "@/components/shared/settlement-summary"
 import { validateEmail, generateIdempotencyKey, getCurrencySymbol, detectPaymentDevice, isMobileDevice } from "@/lib/utils"
 import { PaymentSelector } from "@/components/shared/payment-selector"
 import { Turnstile, useTurnstile } from "@/components/shared/turnstile"
@@ -22,6 +23,7 @@ export default function CheckoutPage() {
   const [channels, setChannels] = useState<PaymentChannelItem[]>([])
   const [selectedPayment, setSelectedPayment] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  const settlement = useSettlementQuote({ from_cart: true, payment_method: selectedPayment }, items.length > 0 && !!selectedPayment, JSON.stringify(items))
   const emailInputRef = useRef<HTMLInputElement>(null)
   const { turnstileToken, setTurnstileToken, handleTurnstileReset } = useTurnstile()
 
@@ -30,10 +32,7 @@ export default function CheckoutPage() {
     let cancelled = false
     async function fetchChannels() {
       try {
-        const chs = await withMockFallback(
-          () => paymentApi.getChannels(),
-          () => mockPaymentChannels
-        )
+        const chs = await paymentApi.getChannels()
         if (!cancelled) {
           const enabled = chs.filter(c => c.is_enabled)
           setChannels(enabled)
@@ -50,6 +49,7 @@ export default function CheckoutPage() {
   }, [])
 
   const handleConfirmOrder = async () => {
+    if (!settlement.quote) { toast.error(settlement.error || "请等待结算金额计算完成"); return }
     if (!email.trim()) {
       toast.error(t("product.emailRequired"))
       emailInputRef.current?.focus()
@@ -69,15 +69,13 @@ export default function CheckoutPage() {
     try {
       setTurnstileHeaders(turnstileToken)
       const device = detectPaymentDevice()
-      const result = await withMockFallback(
-        () => orderApi.createFromCart({
+      const result = await orderApi.createFromCart({
+          quote_token: settlement.quote.quote_token,
           email,
           payment_method: selectedPayment,
           idempotency_key: generateIdempotencyKey(),
           device,
-        }),
-        () => mockCreateOrder(email, selectedPayment)
-      )
+        })
       await refreshCart()
       toast.success(t("checkout.processingOrder"))
       const payUrlH5 = result.payment.pay_url || ""
@@ -103,6 +101,7 @@ export default function CheckoutPage() {
       router.push(payUrl)
     } catch (err: unknown) {
       toast.error(getApiErrorMessage(err, t))
+      settlement.refresh()
       handleTurnstileReset()
     } finally {
       setSubmitting(false)
@@ -134,7 +133,7 @@ export default function CheckoutPage() {
             <div className="flex items-center justify-between border-t border-border pt-3">
               <span className="text-base font-medium text-foreground">{t("checkout.totalAmount")}</span>
               <span className="text-2xl font-bold text-primary">
-                {getCurrencySymbol(items[0]?.currency)}{totalAmount.toFixed(2)}
+                {settlement.quote ? `¥${settlement.quote.total_amount.toFixed(2)} CNY` : "—"}
               </span>
             </div>
           </div>
@@ -181,6 +180,7 @@ export default function CheckoutPage() {
           )}
         </div>
 
+        {selectedPayment && <SettlementSummary {...settlement} retry={settlement.refresh} usdt={selectedPayment.startsWith("usdt_")} />}
         {/* Security notice */}
         <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/30 p-4">
           <Lock className="h-5 w-5 shrink-0 text-muted-foreground" />
@@ -195,7 +195,7 @@ export default function CheckoutPage() {
         {/* Confirm button */}
         <button
           onClick={handleConfirmOrder}
-          disabled={submitting || items.length === 0}
+          disabled={submitting || items.length === 0 || !settlement.quote}
           className="scheme-glow w-full rounded-lg bg-primary py-3.5 text-base font-semibold text-primary-foreground transition-all hover:brightness-110 disabled:pointer-events-none disabled:opacity-50"
         >
           {submitting ? (
@@ -204,7 +204,7 @@ export default function CheckoutPage() {
               {t("checkout.processingOrder")}
             </span>
           ) : (
-            <>{t("checkout.confirmOrder")} {getCurrencySymbol(items[0]?.currency)}{totalAmount.toFixed(2)}</>
+            <>{t("checkout.confirmOrder")} {settlement.quote ? `¥${settlement.quote.total_amount.toFixed(2)} CNY` : ""}</>
           )}
         </button>
       </div>

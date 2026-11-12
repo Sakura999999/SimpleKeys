@@ -22,6 +22,7 @@ import {
   Moon,
   Globe,
   Palette,
+  ArrowLeftRight,
 } from "lucide-react"
 import { useState } from "react"
 import { cn } from "@/lib/utils"
@@ -37,6 +38,7 @@ const navItems: { labelKey: TranslationKey; href: string; icon: typeof LayoutDas
   { labelKey: "admin.orders", href: "/admin/orders", icon: ShoppingCart },
   { labelKey: "admin.users", href: "/admin/users", icon: Users },
   { labelKey: "admin.payment", href: "/admin/payment-channels", icon: CreditCard },
+  { labelKey: "admin.exchangeRates", href: "/admin/exchange-rates", icon: ArrowLeftRight },
   { labelKey: "admin.siteConfig", href: "/admin/site-config", icon: Settings },
   { labelKey: "admin.risk", href: "/admin/risk", icon: ShieldAlert },
   { labelKey: "admin.txidReview", href: "/admin/txid-reviews", icon: FileSearch },
