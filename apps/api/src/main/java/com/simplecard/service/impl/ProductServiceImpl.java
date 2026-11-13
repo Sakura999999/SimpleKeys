@@ -13,6 +13,9 @@ import com.simplecard.repository.ProductRepository;
 import com.simplecard.repository.ProductSpecRepository;
 import com.simplecard.repository.WholesaleRuleRepository;
 import com.simplecard.service.ProductService;
+import com.simplecard.service.ProductQueryProtection;
+import com.simplecard.service.ProductDisplayCache;
+import com.simplecard.repository.ProductPublicCore;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -32,6 +35,8 @@ public class ProductServiceImpl implements ProductService {
     private final WholesaleRuleRepository wholesaleRuleRepository;
     private final CardKeyRepository cardKeyRepository;
     private final OrderItemRepository orderItemRepository;
+    private final ProductQueryProtection queryProtection;
+    private final ProductDisplayCache displayCache;
 
     @Override
     public PageResult<?> listPublicProducts(UUID categoryId, String keyword, int page, int pageSize) {
@@ -49,14 +54,22 @@ public class ProductServiceImpl implements ProductService {
 
     @Override
     public Map<String, Object> getProductDetail(UUID id) {
-        Product product = productRepository.findById(id)
-                .filter(p -> p.getIsDeleted() == 0 && p.isEnabled())
-                .orElseThrow(() -> new BusinessException(ErrorCode.PRODUCT_NOT_FOUND, "商品不存在或已下架"));
-        Map<String, Object> detail = toProductDetail(product);
-        // 前台公开接口：多规格未启用时隐藏规格信息，防止泄露未启用的规格数据
-        if (!product.isSpecEnabled()) {
-            detail.put("specs", List.of());
-        }
+        String context = displayCache.context(id);
+        return queryProtection.load(id, () -> productRepository.publicCore(id).map(ProductPublicCore::asProduct),
+                product -> publicDetail(product, context));
+    }
+
+    private Map<String, Object> publicDetail(Product product, String context) {
+        List<ProductSpec> specs = product.isSpecEnabled()
+                ? productSpecRepository.findByProductIdAndIsDeletedOrderBySortOrderAsc(product.getId(), 0) : List.of();
+        var counts = stockCounts(product.getId());
+        Map<String,Object> detail = cardBase(product, specs, counts, true);
+        detail.putAll(displayCache.get(product.getId(), context, () -> productRepository.displayFields(product.getId())
+                .orElseThrow(() -> new BusinessException(ErrorCode.PRODUCT_NOT_FOUND, "商品不存在或已下架")).asMap()));
+        detail.put("specs", specs.stream().filter(ProductSpec::isVisible).map(spec -> toSpecMap(spec, counts)).toList());
+        detail.put("spec_enabled", product.isSpecEnabled());
+        detail.put("wholesale_enabled", product.isWholesaleEnabled());
+        detail.put("wholesale_rules", wholesaleMaps(product.getId()));
         return detail;
     }
 
@@ -88,7 +101,6 @@ public class ProductServiceImpl implements ProductService {
             detail.put("is_enabled", p.isEnabled());
             detail.put("sort_order", p.getSortOrder());
             detail.put("low_stock_threshold", p.getLowStockThreshold());
-            detail.put("sales_count", orderItemRepository.sumQuantityByProductId(p.getId()));
             detail.put("created_at", p.getCreatedAt());
             detail.put("updated_at", p.getUpdatedAt());
             return detail;
@@ -99,6 +111,7 @@ public class ProductServiceImpl implements ProductService {
     @Override
     @Transactional
     public Map<String, Object> createProduct(Map<String, Object> req) {
+        queryProtection.beforeMutation();
         Product product = new Product();
         product.setTitle((String) req.get("title"));
         product.setTitleEn((String) req.get("title_en"));
@@ -118,12 +131,15 @@ public class ProductServiceImpl implements ProductService {
         if (req.containsKey("initial_sales")) product.setInitialSales(((Number) req.get("initial_sales")).intValue());
         if (req.containsKey("sort_order")) product.setSortOrder(((Number) req.get("sort_order")).intValue());
         productRepository.save(product);
+        queryProtection.mutation(product.getId());
         return toProductDetail(product);
     }
 
     @Override
     @Transactional
     public void updateProduct(UUID id, Map<String, Object> req) {
+        queryProtection.beforeMutation();
+        queryProtection.mutation(id);
         Product product = productRepository.findById(id)
                 .filter(p -> p.getIsDeleted() == 0)
                 .orElseThrow(() -> new BusinessException(ErrorCode.PRODUCT_NOT_FOUND, "商品不存在"));
@@ -150,6 +166,8 @@ public class ProductServiceImpl implements ProductService {
     @Override
     @Transactional
     public void deleteProduct(UUID id) {
+        queryProtection.beforeMutation();
+        queryProtection.mutation(id);
         Product product = productRepository.findById(id)
                 .orElseThrow(() -> new BusinessException(ErrorCode.PRODUCT_NOT_FOUND, "商品不存在"));
         product.setIsDeleted(1);
@@ -158,8 +176,9 @@ public class ProductServiceImpl implements ProductService {
 
     @Override
     public Object listSpecs(UUID productId) {
+        var counts = stockCounts(productId);
         return productSpecRepository.findByProductIdAndIsDeletedOrderBySortOrderAsc(productId, 0).stream()
-                .map(this::toSpecMap).toList();
+                .map(spec -> toSpecMap(spec, counts)).toList();
     }
 
     @Override
@@ -252,72 +271,65 @@ public class ProductServiceImpl implements ProductService {
         }
     }
 
-    private long getStockAvailable(UUID productId, UUID specId) {
-        if (specId != null) {
-            return cardKeyRepository.countByProductIdAndSpecIdAndStatus(productId, specId, CardKeyStatus.AVAILABLE);
-        }
-        return cardKeyRepository.countByProductIdAndSpecIdIsNullAndStatus(productId, CardKeyStatus.AVAILABLE);
+    private Map<UUID, EnumMap<CardKeyStatus,Long>> stockCounts(UUID productId) {
+        Map<UUID, EnumMap<CardKeyStatus,Long>> result = new HashMap<>();
+        for (Object[] row : cardKeyRepository.countsBySpecAndStatus(productId))
+            result.computeIfAbsent((UUID) row[0], ignored -> new EnumMap<>(CardKeyStatus.class))
+                    .put((CardKeyStatus) row[1], ((Number) row[2]).longValue());
+        return result;
     }
 
-    private Map<String, Object> toProductCard(Product p) {
-        Map<String, Object> map = new LinkedHashMap<>();
-        map.put("id", p.getId());
-        map.put("title", p.getTitle());
-        map.put("title_en", p.getTitleEn());
-        map.put("description", p.getDescription());
-        map.put("description_en", p.getDescriptionEn());
-        map.put("cover_url", p.getCoverUrl());
-        map.put("base_price", p.getBasePrice());
-        map.put("currency", p.getCurrency());
-        map.put("category_id", p.getCategoryId());
-        List<ProductSpec> specs = productSpecRepository.findByProductIdAndIsDeletedOrderBySortOrderAsc(p.getId(), 0);
+    private long available(Map<UUID, EnumMap<CardKeyStatus,Long>> counts, UUID specId) {
+        var byStatus = counts.get(specId);
+        return byStatus == null ? 0 : byStatus.getOrDefault(CardKeyStatus.AVAILABLE, 0L);
+    }
+
+    private Map<String,Object> toProductCard(Product p) {
+        var specs = productSpecRepository.findByProductIdAndIsDeletedOrderBySortOrderAsc(p.getId(), 0);
+        return cardBase(p, specs, stockCounts(p.getId()), true);
+    }
+
+    private Map<String,Object> cardBase(Product p, List<ProductSpec> specs,
+            Map<UUID, EnumMap<CardKeyStatus,Long>> counts, boolean publicOnly) {
+        Map<String,Object> map = new LinkedHashMap<>();
+        map.put("id", p.getId()); map.put("title", p.getTitle()); map.put("title_en", p.getTitleEn());
+        map.put("description", p.getDescription()); map.put("description_en", p.getDescriptionEn());
+        map.put("cover_url", p.getCoverUrl()); map.put("base_price", p.getBasePrice());
+        map.put("currency", p.getCurrency()); map.put("category_id", p.getCategoryId());
         boolean hasSpecs = p.isSpecEnabled() && !specs.isEmpty();
-        long stockAvailable;
-        if (hasSpecs) {
-            // 多规格模式：按各规格分别统计可用库存求和（精确隔离，不含默认库存池和已删除规格的卡密）
-            stockAvailable = specs.stream()
-                    .mapToLong(s -> cardKeyRepository.countByProductIdAndSpecIdAndStatus(p.getId(), s.getId(), CardKeyStatus.AVAILABLE))
-                    .sum();
-        } else {
-            // 无规格模式：仅统计 spec_id=null 的卡密
-            stockAvailable = cardKeyRepository.countByProductIdAndSpecIdIsNullAndStatus(p.getId(), CardKeyStatus.AVAILABLE);
-        }
-        map.put("stock_available", stockAvailable);
-        map.put("has_specs", hasSpecs);
+        long stock = hasSpecs ? specs.stream().filter(spec -> !publicOnly || spec.isVisible())
+                .mapToLong(spec -> available(counts, spec.getId())).sum() : available(counts, null);
+        map.put("stock_available", stock); map.put("has_specs", hasSpecs);
         map.put("delivery_type", p.getDeliveryType());
         map.put("sales_count", orderItemRepository.sumQuantityByProductId(p.getId()));
-        map.put("initial_sales", p.getInitialSales());
-        map.put("created_at", p.getCreatedAt());
+        map.put("initial_sales", p.getInitialSales()); map.put("created_at", p.getCreatedAt());
         return map;
     }
 
-    private Map<String, Object> toProductDetail(Product p) {
-        Map<String, Object> map = new LinkedHashMap<>(toProductCard(p));
-        map.put("detail_md", p.getDetailMd());
-        map.put("detail_md_en", p.getDetailMdEn());
-        List<ProductSpec> specs = productSpecRepository.findByProductIdAndIsDeletedOrderBySortOrderAsc(p.getId(), 0);
-        map.put("specs", specs.stream().map(this::toSpecMap).toList());
-        map.put("spec_enabled", p.isSpecEnabled());
-        map.put("wholesale_enabled", p.isWholesaleEnabled());
-        map.put("wholesale_rules", wholesaleRuleRepository.findByProductIdOrderByMinQuantityAsc(p.getId()).stream()
-                .map(r -> {
-                    Map<String, Object> m = new HashMap<>();
-                    m.put("min_quantity", r.getMinQuantity());
-                    m.put("unit_price", r.getUnitPrice());
-                    return m;
-                }).toList());
-        return map;
+    private List<Map<String,Object>> wholesaleMaps(UUID id) {
+        return wholesaleRuleRepository.findByProductIdOrderByMinQuantityAsc(id).stream().map(r -> {
+            Map<String,Object> m = new HashMap<>(); m.put("min_quantity", r.getMinQuantity());
+            m.put("unit_price", r.getUnitPrice()); return m;
+        }).toList();
     }
 
-    private Map<String, Object> toSpecMap(ProductSpec s) {
-        Map<String, Object> map = new LinkedHashMap<>();
-        map.put("id", s.getId());
-        map.put("name", s.getName());
-        map.put("price", s.getPrice());
-        map.put("stock_available", getStockAvailable(s.getProductId(), s.getId()));
-        // 有效卡密数量（AVAILABLE/SOLD/LOCKED），用于前端判断删除规格时是否需要确认
-        map.put("card_key_count", cardKeyRepository.countByProductIdAndSpecIdExcludingStatus(
-                s.getProductId(), s.getId(), CardKeyStatus.INVALID));
-        return map;
+    private Map<String,Object> toProductDetail(Product p) {
+        var specs = productSpecRepository.findByProductIdAndIsDeletedOrderBySortOrderAsc(p.getId(), 0);
+        var counts = stockCounts(p.getId());
+        Map<String,Object> map = cardBase(p, specs, counts, false);
+        map.put("detail_md", p.getDetailMd()); map.put("detail_md_en", p.getDetailMdEn());
+        map.put("specs", specs.stream().map(spec -> toSpecMap(spec, counts)).toList());
+        map.put("spec_enabled", p.isSpecEnabled()); map.put("wholesale_enabled", p.isWholesaleEnabled());
+        map.put("wholesale_rules", wholesaleMaps(p.getId())); return map;
+    }
+
+    private Map<String,Object> toSpecMap(ProductSpec spec, Map<UUID, EnumMap<CardKeyStatus,Long>> counts) {
+        Map<String,Object> map = new LinkedHashMap<>();
+        map.put("id", spec.getId()); map.put("name", spec.getName()); map.put("price", spec.getPrice());
+        map.put("stock_available", available(counts, spec.getId()));
+        var byStatus = counts.get(spec.getId());
+        long valid = byStatus == null ? 0 : byStatus.entrySet().stream()
+                .filter(e -> e.getKey() != CardKeyStatus.INVALID).mapToLong(Map.Entry::getValue).sum();
+        map.put("card_key_count", valid); return map;
     }
 }

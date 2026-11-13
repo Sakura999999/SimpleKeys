@@ -47,17 +47,21 @@ public class CartServiceImpl implements CartService {
         }
 
         BigDecimal totalAmount = BigDecimal.ZERO;
+        Set<String> currencies = new HashSet<>();
         List<Map<String, Object>> itemList = new ArrayList<>();
         for (CartItem item : items) {
             Map<String, Object> m = toCartItemMap(item);
             BigDecimal subtotal = (BigDecimal) m.get("subtotal");
             totalAmount = totalAmount.add(subtotal);
+            currencies.add((String) m.get("currency"));
             itemList.add(m);
         }
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("items", itemList);
-        result.put("total_amount", totalAmount);
+        // A raw sum of different denominations has no meaning; checkout uses /orders/quote.
+        result.put("total_amount", currencies.size() > 1 ? null : totalAmount);
+        result.put("total_currency", currencies.size() == 1 ? currencies.iterator().next() : null);
         return result;
     }
 

@@ -18,6 +18,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface OrderRepository extends JpaRepository<Order, UUID> {
+    List<Order> findByStatusOrderByCreatedAtAsc(OrderStatus status);
 
     Optional<Order> findByIdempotencyKey(String idempotencyKey);
 
@@ -49,13 +50,13 @@ public interface OrderRepository extends JpaRepository<Order, UUID> {
     Page<Order> findRiskFlaggedOrders(Pageable pageable);
 
     // Dashboard aggregate queries
-    @Query("SELECT COALESCE(SUM(o.actualAmount), 0) FROM Order o WHERE (o.status = com.simplecard.constant.OrderStatus.PAID OR o.status = com.simplecard.constant.OrderStatus.DELIVERED) AND o.paidAt >= :since")
+    @Query("SELECT COALESCE(SUM(o.actualAmount), 0) FROM Order o WHERE (o.status = com.simplecard.constant.OrderStatus.PAID_REVIEW OR o.status = com.simplecard.constant.OrderStatus.PAID OR o.status = com.simplecard.constant.OrderStatus.DELIVERED) AND o.paidAt >= :since")
     BigDecimal sumSalesSince(@Param("since") LocalDateTime since);
 
-    @Query("SELECT COUNT(o) FROM Order o WHERE (o.status = com.simplecard.constant.OrderStatus.PAID OR o.status = com.simplecard.constant.OrderStatus.DELIVERED) AND o.paidAt >= :since")
+    @Query("SELECT COUNT(o) FROM Order o WHERE (o.status = com.simplecard.constant.OrderStatus.PAID_REVIEW OR o.status = com.simplecard.constant.OrderStatus.PAID OR o.status = com.simplecard.constant.OrderStatus.DELIVERED) AND o.paidAt >= :since")
     long countPaidOrdersSince(@Param("since") LocalDateTime since);
 
-    @Query("SELECT COUNT(o) FROM Order o WHERE (o.status = com.simplecard.constant.OrderStatus.PAID OR o.status = com.simplecard.constant.OrderStatus.DELIVERED)")
+    @Query("SELECT COUNT(o) FROM Order o WHERE (o.status = com.simplecard.constant.OrderStatus.PAID_REVIEW OR o.status = com.simplecard.constant.OrderStatus.PAID OR o.status = com.simplecard.constant.OrderStatus.DELIVERED)")
     long countTotalPaidOrders();
 
     long count();

@@ -5,7 +5,7 @@ import { Search, ChevronDown, Eye, Download, ChevronLeft, ChevronRight, X, Check
 import { cn, stripInvisible } from "@/lib/utils"
 import { useLocale } from "@/lib/context"
 import { toast } from "sonner"
-import { adminOrderApi, adminCardKeyApi, withMockFallback } from "@/services/api"
+import { adminPaymentInboxApi, type PendingPaymentEvent, adminOrderApi, adminCardKeyApi, withMockFallback } from "@/services/api"
 import { mockAdminOrderList, mockOrderCardKeys } from "@/lib/mock-data"
 import { OrderStatusBadge } from "@/components/shared/order-status-badge"
 import { PaymentIcon, getPaymentLabel } from "@/components/shared/payment-icon"
@@ -39,6 +39,9 @@ export default function AdminOrdersPage() {
     }
   }
 
+  const [pendingPayments, setPendingPayments] = useState<PendingPaymentEvent[]>([])
+  const [paymentInboxError, setPaymentInboxError] = useState(false)
+  const [retryingPayment, setRetryingPayment] = useState<string | null>(null)
   const [orders, setOrders] = useState<AdminOrderItem[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -55,6 +58,8 @@ export default function AdminOrdersPage() {
 
   const fetchOrders = async () => {
     setLoading(true)
+    try { const inbox = await adminPaymentInboxApi.pending(); setPendingPayments(inbox.list); setPaymentInboxError(false) }
+    catch { setPaymentInboxError(true) }
     try {
       const data = await withMockFallback(
         () => adminOrderApi.getList({
@@ -146,6 +151,16 @@ export default function AdminOrdersPage() {
         </button>
       </div>
 
+      <div className="text-sm text-muted-foreground">已付款待处理：补货后可重试发货，或在支付渠道退款成功后登记退款凭证。</div>
+      {paymentInboxError && <p className="text-sm text-amber-700">暂时无法读取待确认付款，请稍后刷新。</p>}
+      {pendingPayments.length > 0 && <section className="rounded-xl border border-amber-300 bg-amber-50/30 p-4">
+        <h2 className="font-semibold">已核验付款待处理（系统自动重试中）</h2>
+        <p className="mt-1 text-sm text-muted-foreground">无需让客户重复付款。若多次重试仍未完成，请检查 Redis 和后端错误记录。</p>
+        <div className="mt-3 flex flex-col gap-3">{pendingPayments.map(event => <div key={event.id} className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-sm">
+          <div><button className="underline" onClick={() => { setSearch(event.order_id); setStatusFilter("") }}>{event.order_id}</button><span className="ml-3">{event.channel_code} · 已重试 {event.retry_count} 次</span>{event.last_error && <p className="mt-1 text-muted-foreground">{event.last_error}</p>}</div>
+          <button disabled={retryingPayment !== null} className="rounded-lg border px-3 py-2 disabled:opacity-50" onClick={async () => { setRetryingPayment(event.id); try { const done=await adminPaymentInboxApi.retry(event.id); toast[done ? "success" : "info"](done ? "付款处理已完成" : "仍在等待处理，系统将继续重试"); await fetchOrders() } catch (e) { toast.error(e instanceof Error ? e.message : "重试失败") } finally { setRetryingPayment(null) } }}>{retryingPayment === event.id ? "处理中…" : "立即重试"}</button>
+        </div>)}</div>
+      </section>}
       {/* Filters */}
       <div className="flex flex-wrap gap-3">
         <div className="relative flex-1 min-w-[200px] max-w-sm">
@@ -170,6 +185,8 @@ export default function AdminOrdersPage() {
             <option value="PAID">已支付</option>
             <option value="DELIVERED">已发货</option>
             <option value="EXPIRED">已过期</option>
+            <option value="PAID_REVIEW">已付款待处理</option>
+            <option value="REFUNDED">已退款</option>
           </select>
           <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         </div>
@@ -401,6 +418,7 @@ export default function AdminOrdersPage() {
                         {item.product_title}
                         {item.spec_name && <span className="text-muted-foreground"> - {item.spec_name}</span>}
                         <span className="ml-2 text-muted-foreground">×{item.quantity}</span>
+                        {item.source_currency && item.source_currency !== "CNY" && <span className="mt-1 block text-xs text-muted-foreground">原价 {item.source_currency} {item.source_unit_price?.toFixed(2)} · 下单汇率 {item.exchange_rate} CNY</span>}
                       </span>
                       <span className="font-medium text-foreground">¥{item.subtotal.toFixed(2)}</span>
                     </div>
@@ -412,8 +430,9 @@ export default function AdminOrdersPage() {
 
               <div className="grid grid-cols-2 gap-x-8 gap-y-4">
                 <div className="flex flex-col gap-1">
-                  <span className="text-xs text-muted-foreground">支付金额</span>
+                  <span className="text-xs text-muted-foreground">订单结算金额（CNY）</span>
                   <span className="text-sm font-medium text-foreground">¥{showDetail.actual_amount.toFixed(2)}</span>
+                  {showDetail.payment_currency && showDetail.payment_currency !== "CNY" && <span className="text-xs text-muted-foreground">网关计价：{showDetail.payment_currency} {showDetail.payment_amount?.toFixed(2)}</span>}
                 </div>
                 <div className="flex flex-col gap-1">
                   <span className="text-xs text-muted-foreground">支付方式</span>
@@ -483,7 +502,9 @@ export default function AdminOrdersPage() {
                 </div>
               )}
             </div>
-            <div className="flex justify-end gap-3 border-t border-border px-6 py-4">
+            {showDetail.payment_review_reason && <p className="px-6 pb-3 text-sm text-orange-700">{showDetail.payment_review_reason}</p>}
+            {showDetail.refund_reference && <p className="px-6 pb-3 text-sm">退款凭证：{showDetail.refund_reference}</p>}
+            <div className="flex flex-wrap justify-end gap-3 border-t border-border px-6 py-4">
               <button
                 type="button"
                 className="rounded-lg border border-input bg-transparent px-4 py-2 text-sm font-medium text-foreground hover:bg-accent transition-colors"
@@ -491,6 +512,12 @@ export default function AdminOrdersPage() {
               >
                 {t("common.close")}
               </button>
+      {showDetail.status === "PAID_REVIEW" && (
+        <div className="flex gap-3">
+          <button className="rounded-lg border px-3 py-2 text-sm hover:bg-accent" onClick={async () => { try { await adminOrderApi.retryDelivery(showDetail.id); toast.success("已尝试发货，请查看订单最新状态"); setShowDetail(null); await fetchOrders() } catch (e) { toast.error(e instanceof Error ? e.message : "操作失败") } }}>补货后重试发货</button>
+          <button className="rounded-lg border px-3 py-2 text-sm hover:bg-accent" onClick={async () => { const ref = window.prompt("请确认支付渠道已退款成功，并填写退款流水号："); if (!ref?.trim()) return; try { await adminOrderApi.recordRefund(showDetail.id, ref.trim()); setShowDetail(null); await fetchOrders() } catch (e) { toast.error(e instanceof Error ? e.message : "操作失败") } }}>登记已退款</button>
+        </div>
+      )}
               {showDetail.status === "PENDING" && (
                 <button
                   type="button"

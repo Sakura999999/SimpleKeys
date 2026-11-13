@@ -198,7 +198,7 @@ upload:
 
 ### 方式一：Docker 部署（推荐）
 
-仓库根目录提供 `docker-compose.yml`，编排 **api / web / bepusdt** 三个容器；**不含 PostgreSQL 和 Nginx**，需自行准备。
+仓库根目录提供 `docker-compose.yml`，编排 **api / web / redis / bepusdt** 四个容器；**不含 PostgreSQL 和 Nginx**，需自行准备。
 
 镜像发布至 GHCR 公开仓库，默认 `:latest` tag 跟随最新 release，无需登录即可匿名拉取：
 
@@ -264,3 +264,9 @@ pnpm dev:web
 ## License
 
 [MIT](LICENSE) © 2026 runtimepoet
+
+## Redis 分布式协调
+
+后端默认启用 Redisson 订单/库存锁，需要运行 Redis 并配置随机 `REDIS_PASSWORD`。付款核验后先持久化事件，Redis 暂时不可用时由后台恢复处理。部署前执行 `apps/api/src/main/resources/db/redis-coordination.sql`。详细配置、故障策略和隔离测试见 [Redis 协调说明](docs/redis-coordination.md)。
+
+公开商品详情默认启用布隆过滤器、空值缓存、展示字段短缓存、请求合并及 Redisson 互斥重建，统一复用回源限流，使用独立的 `product-cache` Redis。价格、库存和可见性实时查库；规格统计已批量聚合。部署时设置随机 `PRODUCT_CACHE_REDIS_PASSWORD`，排空旧实例后统一升级；无需新增数据库迁移。见 [商品查询防护说明](docs/product-query-protection.md)。

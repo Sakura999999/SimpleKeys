@@ -101,7 +101,7 @@ public class EpayServiceImpl implements EpayService {
                 if (code != 1) {
                     // 业务错误不重试
                     log.error("Epay API error: code={}, msg={}", code, msg);
-                    throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建失败：" + msg);
+                    throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建失败：" + msg);
                 }
 
                 String resultQrcode = qrcode != null ? qrcode : urlscheme;

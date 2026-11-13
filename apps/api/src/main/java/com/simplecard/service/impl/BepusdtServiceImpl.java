@@ -98,7 +98,7 @@ public class BepusdtServiceImpl implements BepusdtService {
 
                 if (code != 200) {
                     log.error("BEpusdt API error: status_code={}, message={}", code, msg);
-                    throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：" + msg);
+                    throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：" + msg);
                 }
 
                 // 解析 data 字段

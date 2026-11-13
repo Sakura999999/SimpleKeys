@@ -325,7 +325,7 @@ export default function OrderQueryPage() {
                   </button>
                 </span>
               </div>
-              <OrderStatusBadge status={order.status} />
+              <OrderStatusBadge status={order.status} paymentProcessing={order.payment_processing} />
             </div>
 
             <hr className="border-border" />
@@ -371,7 +371,7 @@ export default function OrderQueryPage() {
             </div>
 
             {/* 继续支付按钮 — PENDING 且非 USDT */}
-            {order.status === "PENDING" && order.payment_method && !order.payment_method.startsWith("usdt_") && (
+            {order.status === "PENDING" && !order.payment_processing && order.payment_method && !order.payment_method.startsWith("usdt_") && (
               <Link
                 href={`/pay/${order.id}?method=${order.payment_method}`}
                 className="inline-flex h-9 w-full items-center justify-center gap-1.5 rounded-lg bg-primary text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
@@ -382,7 +382,7 @@ export default function OrderQueryPage() {
 
             {/* USDT 补单区域 — 仅 USDT + PENDING/EXPIRED */}
             {order.payment_method?.startsWith("usdt_") &&
-             (order.status === "PENDING" || order.status === "EXPIRED") && (
+             (order.status === "PENDING" || order.status === "EXPIRED") && !order.payment_processing && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-950/30">
                 {/* TXID 验证结果反馈（本次会话即时结果优先） */}
                 {txidResult[order.id] ? (

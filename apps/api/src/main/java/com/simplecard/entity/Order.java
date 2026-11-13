@@ -17,7 +17,7 @@ import java.util.UUID;
 @NoArgsConstructor
 @AllArgsConstructor
 @Entity
-@Table(name = "orders")
+@Table(name = "orders", indexes = {@Index(name="idx_orders_status_expiry",columnList="status,expires_at")})
 public class Order extends BaseEntity {
 
     private UUID userId;
@@ -54,6 +54,9 @@ public class Order extends BaseEntity {
     private LocalDateTime expiresAt;
 
     private LocalDateTime paidAt;
+
+    private String paymentReviewReason;
+    private String refundReference;
 
     private LocalDateTime deliveredAt;
 

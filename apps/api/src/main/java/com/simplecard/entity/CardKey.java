@@ -15,7 +15,7 @@ import java.util.UUID;
 @NoArgsConstructor
 @AllArgsConstructor
 @Entity
-@Table(name = "card_keys")
+@Table(name = "card_keys", indexes = {@Index(name="idx_keys_pool_status",columnList="product_id,spec_id,status,created_at"), @Index(name="idx_keys_order",columnList="order_id")})
 public class CardKey extends BaseEntity {
 
     @Column(nullable = false)

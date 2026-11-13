@@ -345,7 +345,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
         () => mockCartData()
       )
       setCartItems(cart.items)
-      setCartTotal(cart.total_amount)
+      setCartTotal(cart.total_amount ?? 0)
     } catch {
       // silently fail — cart is not critical
     } finally {

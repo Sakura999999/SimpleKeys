@@ -55,13 +55,13 @@ public class EmailServiceImpl implements EmailService {
 
         try {
             Order order = orderRepository.findById(orderId).orElse(null);
-            if (order == null || order.getEmail() == null || order.getEmail().isBlank()) {
+            if (order == null || order.getStatus() != com.simplecard.constant.OrderStatus.DELIVERED || order.getEmail() == null || order.getEmail().isBlank()) {
                 log.warn("Cannot send delivery email: order {} not found or no email", orderId);
                 return;
             }
 
             List<OrderItem> items = orderItemRepository.findByOrderId(orderId);
-            List<CardKey> keys = cardKeyRepository.findByOrderId(orderId);
+            List<CardKey> keys = cardKeyRepository.findByOrderId(orderId).stream().filter(k -> k.getStatus() == com.simplecard.constant.CardKeyStatus.SOLD).toList();
             Map<UUID, OrderItem> itemMap = items.stream()
                     .collect(Collectors.toMap(OrderItem::getId, i -> i));
             Map<UUID, List<CardKey>> grouped = keys.stream()

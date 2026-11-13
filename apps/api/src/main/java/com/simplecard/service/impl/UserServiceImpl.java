@@ -10,6 +10,7 @@ import com.simplecard.exception.BusinessException;
 import com.simplecard.model.request.ChangePasswordRequest;
 import com.simplecard.model.response.UserProfileResponse;
 import com.simplecard.repository.OrderRepository;
+import com.simplecard.repository.VerifiedPaymentEventRepository;
 import com.simplecard.repository.PointsLogRepository;
 import com.simplecard.repository.UserRepository;
 import com.simplecard.service.UserService;
@@ -31,6 +32,8 @@ public class UserServiceImpl implements UserService {
 
     private final UserRepository userRepository;
     private final OrderRepository orderRepository;
+    private final VerifiedPaymentEventRepository paymentEvents;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final PointsLogRepository pointsLogRepository;
     private final PasswordEncoder passwordEncoder;
 
@@ -57,7 +60,6 @@ public class UserServiceImpl implements UserService {
     }
 
     @Override
-    @Transactional
     public PageResult<?> getOrders(UUID userId, String status, int page, int pageSize) {
         PageRequest pageable = PageRequest.of(page - 1, pageSize);
         Page<Order> orderPage;
@@ -78,8 +80,11 @@ public class UserServiceImpl implements UserService {
         LocalDateTime now = LocalDateTime.now();
         for (Order o : orderPage.getContent()) {
             if (o.getStatus() == OrderStatus.PENDING && o.getExpiresAt().isBefore(now)) {
-                o.setStatus(OrderStatus.EXPIRED);
-                orderRepository.save(o);
+                try { inventoryLifecycle.close(o.getId(), false); }
+                catch (com.simplecard.exception.BusinessException busy) {
+                    if (busy.getHttpStatus() != org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE) throw busy;
+                }
+                o.setStatus(orderRepository.findById(o.getId()).orElseThrow().getStatus());
             }
         }
 
@@ -107,6 +112,7 @@ public class UserServiceImpl implements UserService {
         map.put("total_amount", o.getTotalAmount());
         map.put("actual_amount", o.getActualAmount());
         map.put("status", o.getStatus().name());
+            map.put("payment_processing", paymentEvents.existsByOrderIdAndProcessedFalse(o.getId()));
         map.put("order_type", o.getOrderType().name());
         map.put("payment_method", o.getPaymentMethod());
         map.put("created_at", o.getCreatedAt());

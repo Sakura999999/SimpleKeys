@@ -28,6 +28,7 @@ public class AdminTxidReviewController {
 
     private final UnmatchedTransactionRepository unmatchedTransactionRepository;
     private final OrderRepository orderRepository;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
 
     @GetMapping
     public ApiResponse<?> listTxidReviews(
@@ -65,6 +66,7 @@ public class AdminTxidReviewController {
 
     @LogOperation(action = "txid.approve", targetType = "TXID_REVIEW", targetId = "#id", detail = "'通过TXID审核'")
     @PostMapping("/{id}/approve")
+    @org.springframework.transaction.annotation.Transactional
     public ApiResponse<Void> approveTxidReview(@PathVariable UUID id) {
         UnmatchedTransaction ut = unmatchedTransactionRepository.findById(id)
                 .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "审核记录不存在"));
@@ -93,10 +95,7 @@ public class AdminTxidReviewController {
         if (ut.getOrderId() != null) {
             Order order = orderRepository.findById(ut.getOrderId()).orElse(null);
             if (order != null && (order.getStatus() == OrderStatus.PENDING || order.getStatus() == OrderStatus.EXPIRED)) {
-                order.setStatus(OrderStatus.PAID);
-                order.setPaidAt(LocalDateTime.now());
-                order.setUsdtTxId(ut.getTxid());
-                orderRepository.save(order);
+                inventoryLifecycle.confirmPayment(order.getId(), ut.getTxid());
                 log.info("TXID review approved: order {} marked as PAID", ut.getOrderId());
             }
         }

@@ -38,6 +38,8 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
   const router = useRouter()
   const { refreshCart } = useCart()
 
+  const [orderInfoLoaded, setOrderInfoLoaded] = useState(false)
+  const [paymentProcessing, setPaymentProcessing] = useState(false)
   const [status, setStatus] = useState<OrderStatus>("PENDING")
   const [timeLeft, setTimeLeft] = useState(-1) // -1 = 等待服务端返回真实倒计时，避免闪屏
   const [refreshCooldown, setRefreshCooldown] = useState(0)
@@ -85,6 +87,8 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
     async function fetchOrderInfo() {
       try {
         const result = await orderApi.getStatus(orderId)
+        setOrderInfoLoaded(true)
+        setPaymentProcessing(Boolean(result.payment_processing))
         if (result.remaining_seconds !== undefined) {
           setTimeLeft(result.remaining_seconds)
         }
@@ -104,7 +108,7 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
   // H5 自动跳转（移动端 + 有 payUrl + PENDING 状态 + 未跳转过 + 非微信）
   // 微信 jspay 走 JSAPI（需微信浏览器），普通浏览器不能 H5 跳转，只能扫码
   useEffect(() => {
-    if (!isMobile || !payUrlH5 || status !== "PENDING" || isUsdtPayment || isWechatMobile) return
+    if (!orderInfoLoaded || paymentProcessing || !isMobile || !payUrlH5 || status !== "PENDING" || isUsdtPayment || isWechatMobile) return
     const storageKey = `pay_redirected_${orderId}`
     if (sessionStorage.getItem(storageKey)) {
       setHasRedirected(true)
@@ -113,7 +117,7 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
     sessionStorage.setItem(storageKey, "1")
     setHasRedirected(true)
     window.location.href = payUrlH5
-  }, [isMobile, payUrlH5, status, orderId, isUsdtPayment, isWechatMobile])
+  }, [orderInfoLoaded, paymentProcessing, isMobile, payUrlH5, status, orderId, isUsdtPayment, isWechatMobile])
 
   // Countdown timer — 仅在服务端返回真实倒计时后才开始递减
   // 倒计时归零时仅停止递减，不单方面设置 EXPIRED — 等待下一次轮询从服务端获取真实状态
@@ -132,6 +136,8 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
     const poll = setInterval(async () => {
       try {
         const result = await orderApi.getStatus(orderId)
+        setOrderInfoLoaded(true)
+        setPaymentProcessing(Boolean(result.payment_processing))
         // 同步服务端倒计时，防止客户端时间漂移
         if (result.remaining_seconds !== undefined) {
           setTimeLeft(result.remaining_seconds)
@@ -163,6 +169,7 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
     setIsRefreshing(true)
     try {
       const result = await orderApi.getStatus(orderId)
+      setPaymentProcessing(Boolean(result.payment_processing))
       if (result.status !== "PENDING") {
         setStatus(result.status)
         if (result.status === "PAID" || result.status === "DELIVERED") {
@@ -245,6 +252,14 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
     const timer = setTimeout(() => setRedirectCount((prev) => prev - 1), 1000)
     return () => clearTimeout(timer)
   }, [status, redirectCount, orderId, router])
+
+  if (paymentProcessing && status === "PENDING") {
+    return <div className="mx-auto max-w-md py-16 text-center"><h1 className="text-xl font-semibold">付款已收到，正在确认发货</h1><p className="mt-4 text-muted-foreground">请勿重复付款。系统将自动重试处理，你也可以稍后查询订单。</p><button className="mt-6 underline" onClick={() => router.push(`/order/query?orderId=${orderId}`)}>查看订单</button></div>
+  }
+
+  if (status === "PAID_REVIEW" || status === "REFUNDED") {
+    return <div className="mx-auto max-w-md py-16 text-center"><h1 className="text-xl font-semibold">{t(status === "PAID_REVIEW" ? "status.PAID_REVIEW" : "status.REFUNDED")}</h1><p className="mt-4 text-muted-foreground">{status === "PAID_REVIEW" ? "付款已确认，订单等待补货或人工处理，请联系客服。" : "退款已登记，请核对支付渠道到账情况。"}</p><button className="mt-6 underline" onClick={() => router.push(`/order/query?orderId=${orderId}`)}>查看订单</button></div>
+  }
 
   if (status === "PAID" || status === "DELIVERED") {
     return (

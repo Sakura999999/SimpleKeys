@@ -258,7 +258,9 @@ const zh = {
 
   // Status
   "status.PENDING": "待支付",
+  "status.PAYMENT_PROCESSING": "付款已收到，处理中",
   "status.PAID": "已支付",
+  "status.PAID_REVIEW": "已付款，待处理",
   "status.DELIVERED": "已发货",
   "status.EXPIRED": "已过期",
   "status.REFUNDED": "已退款",
@@ -887,7 +889,9 @@ const en: Record<keyof typeof zh, string> = {
 
   // Status
   "status.PENDING": "Pending",
+  "status.PAYMENT_PROCESSING": "Payment received, processing",
   "status.PAID": "Paid",
+  "status.PAID_REVIEW": "Paid, awaiting resolution",
   "status.DELIVERED": "Delivered",
   "status.EXPIRED": "Expired",
   "status.REFUNDED": "Refunded",

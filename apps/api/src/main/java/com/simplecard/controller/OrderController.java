@@ -26,6 +26,7 @@ import java.util.UUID;
 public class OrderController {
 
     private final OrderService orderService;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final DeliverService deliverService;
     private final OrderRepository orderRepository;
     private final UnmatchedTransactionRepository unmatchedTransactionRepository;
@@ -67,9 +68,9 @@ public class OrderController {
             payment = paymentService.createPayment(
                     created.orderId(), created.paymentMethod(), created.actualAmount(), created.device());
         } catch (RuntimeException e) {
-            // 订单已独立提交，网关失败不会再连带回滚 —— 必须显式作废，
-            // 否则这笔永远无法支付的 PENDING 订单会占用用户的未付款配额。
-            orderService.markPaymentSetupFailed(created.orderId());
+            // Explicit gateway rejection releases stock; ambiguous transport failure retains it until expiry.
+            if (e instanceof com.simplecard.exception.PaymentRejectedException) inventoryLifecycle.close(created.orderId(), true);
+            else orderService.markPaymentSetupFailed(created.orderId());
             throw e;
         }
 

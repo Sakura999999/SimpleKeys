@@ -26,6 +26,8 @@ import java.util.*;
 public class OrderServiceImpl implements OrderService {
 
     private final OrderRepository orderRepository;
+    private final VerifiedPaymentEventRepository paymentEvents;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final OrderItemRepository orderItemRepository;
     private final ProductRepository productRepository;
     private final ProductSpecRepository productSpecRepository;
@@ -83,10 +85,11 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
-    @Transactional
+    @Transactional(timeout = 15)
     public CreatedOrder createDirectOrder(Map<String, Object> req, UUID userId, String clientIp, String sessionToken) {
         String device = optionalString(req, "device");
         String idempotencyKey = optionalString(req, "idempotency_key");
+        inventoryLifecycle.lockRequest(idempotencyKey);
         if (idempotencyKey != null) {
             Optional<Order> existing = orderRepository.findByIdempotencyKey(idempotencyKey);
             if (existing.isPresent()) {
@@ -179,14 +182,16 @@ public class OrderServiceImpl implements OrderService {
         snapshot(item,priceLine);
         orderItemRepository.save(item);
 
+        inventoryLifecycle.reserve(order.getId());
         return buildOrderResult(order, device);
     }
 
     @Override
-    @Transactional
+    @Transactional(timeout = 15)
     public CreatedOrder createCartOrder(Map<String, Object> req, UUID userId, String clientIp, String sessionToken) {
         String device = optionalString(req, "device");
         String idempotencyKey = optionalString(req, "idempotency_key");
+        inventoryLifecycle.lockRequest(idempotencyKey);
         if (idempotencyKey != null) {
             Optional<Order> existing = orderRepository.findByIdempotencyKey(idempotencyKey);
             if (existing.isPresent()) {
@@ -308,36 +313,36 @@ public class OrderServiceImpl implements OrderService {
             cartItemRepository.delete(ci);
         }
 
+        inventoryLifecycle.reserve(order.getId());
         return buildOrderResult(order, device);
     }
 
     @Override
-    @Transactional
     public void markPaymentSetupFailed(UUID orderId) {
-        orderRepository.findById(orderId).ifPresent(order -> {
-            // 只作废尚未拿到支付链接的 PENDING 订单，避免误伤已可支付或已支付的订单
-            if (order.getStatus() == OrderStatus.PENDING
-                    && order.getPaymentUrl() == null && order.getQrcodeUrl() == null) {
-                order.setStatus(OrderStatus.EXPIRED);
-                orderRepository.save(order);
-                log.warn("Order {} voided: payment channel setup failed", orderId);
-            }
-        });
+        // A timeout may have created a payable gateway order: retain until normal expiry.
+        // Definitive failures can be explicitly closed by close(id,true).
+        inventoryLifecycle.close(orderId, false);
+        log.warn("Payment setup outcome unknown; reservation retained until order expiry: {}", orderId);
+
     }
 
     @Override
-    @Transactional
     public Map<String, Object> getOrderStatus(UUID orderId) {
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在"));
         // Auto expire check
         if (order.getStatus() == OrderStatus.PENDING && order.getExpiresAt().isBefore(LocalDateTime.now())) {
-            order.setStatus(OrderStatus.EXPIRED);
-            orderRepository.save(order);
+            try { inventoryLifecycle.close(order.getId(), false); }
+            catch (com.simplecard.exception.BusinessException busy) {
+                if (busy.getHttpStatus() != org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE) throw busy;
+            }
+            order = orderRepository.findById(orderId).orElseThrow();
         }
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("order_id", order.getId());
         result.put("status", order.getStatus().name());
+        result.put("payment_processing", paymentEvents.existsByOrderIdAndProcessedFalse(orderId));
+        result.put("payment_review_reason", order.getPaymentReviewReason());
         result.put("expires_at", order.getExpiresAt());
         // 返回服务端计算的剩余秒数，前端倒计时以此为准，不受客户端时钟影响
         if (order.getStatus() == OrderStatus.PENDING) {
@@ -364,12 +369,11 @@ public class OrderServiceImpl implements OrderService {
 
     @Override
     @Scheduled(fixedRate = 60000)
-    @Transactional
     public void expireOrders() {
         List<Order> expired = orderRepository.findExpiredOrders(LocalDateTime.now());
         for (Order order : expired) {
-            order.setStatus(OrderStatus.EXPIRED);
-            orderRepository.save(order);
+            try { inventoryLifecycle.close(order.getId(), false); }
+            catch (RuntimeException busy) { log.warn("Expiry deferred for order {} ({})",order.getId(),busy.getClass().getSimpleName()); continue; }
             log.info("Order expired: {}", order.getId());
         }
     }
@@ -453,6 +457,7 @@ public class OrderServiceImpl implements OrderService {
         map.put("payment_currency",o.getPaymentCurrency());
         map.put("payment_amount",o.getPaymentAmount());
         map.put("status", o.getStatus().name());
+            map.put("payment_review_reason", o.getPaymentReviewReason());
         map.put("order_type", o.getOrderType().name());
         map.put("payment_method", o.getPaymentMethod());
         map.put("created_at", o.getCreatedAt());

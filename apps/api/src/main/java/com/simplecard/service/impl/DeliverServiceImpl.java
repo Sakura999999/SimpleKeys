@@ -7,14 +7,11 @@ import com.simplecard.entity.*;
 import com.simplecard.exception.BusinessException;
 import com.simplecard.repository.*;
 import com.simplecard.service.DeliverService;
-import com.simplecard.service.EmailService;
 import com.simplecard.service.OrderAccessGuard;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-import org.springframework.transaction.support.TransactionSynchronization;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -26,18 +23,15 @@ import java.util.stream.Collectors;
 public class DeliverServiceImpl implements DeliverService {
 
     private final OrderRepository orderRepository;
+    private final VerifiedPaymentEventRepository paymentEvents;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final OrderItemRepository orderItemRepository;
     private final CardKeyRepository cardKeyRepository;
-    private final UserRepository userRepository;
-    private final PointsLogRepository pointsLogRepository;
-    private final SiteConfigRepository siteConfigRepository;
     private final UnmatchedTransactionRepository unmatchedTransactionRepository;
-    private final EmailService emailService;
     private final OrderAccessGuard orderAccessGuard;
 
     @Override
     @SuppressWarnings("unchecked")
-    @Transactional
     public List<?> queryOrders(Map<String, Object> request, String callerSessionToken) {
         List<Order> orders = new ArrayList<>();
         Set<UUID> seen = new LinkedHashSet<>();
@@ -78,8 +72,11 @@ public class DeliverServiceImpl implements DeliverService {
         LocalDateTime now = LocalDateTime.now();
         for (Order o : orders) {
             if (o.getStatus() == OrderStatus.PENDING && o.getExpiresAt().isBefore(now)) {
-                o.setStatus(OrderStatus.EXPIRED);
-                orderRepository.save(o);
+                try { inventoryLifecycle.close(o.getId(), false); }
+                catch (com.simplecard.exception.BusinessException busy) {
+                    if (busy.getHttpStatus() != org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE) throw busy;
+                }
+                o.setStatus(orderRepository.findById(o.getId()).orElseThrow().getStatus());
             }
         }
 
@@ -91,7 +88,12 @@ public class DeliverServiceImpl implements DeliverService {
             map.put("id", o.getId());
             map.put("total_amount", o.getTotalAmount());
             map.put("actual_amount", o.getActualAmount());
+            map.put("currency", "CNY");
+            map.put("payment_currency",o.getPaymentCurrency());
+            map.put("payment_amount",o.getPaymentAmount());
             map.put("status", o.getStatus().name());
+            map.put("payment_processing", paymentEvents.existsByOrderIdAndProcessedFalse(o.getId()));
+            map.put("payment_review_reason", o.getPaymentReviewReason());
             map.put("order_type", o.getOrderType().name());
             map.put("payment_method", o.getPaymentMethod());
             map.put("created_at", o.getCreatedAt());
@@ -143,7 +145,7 @@ public class DeliverServiceImpl implements DeliverService {
     }
 
     private Map<String, Object> deliverSingleOrder(UUID orderId, String callerSessionToken) {
-        // F2: 悲观锁 — 防止同一 PAID 订单被并发请求重复发货分配双份卡密
+        // Read only the cards assigned by the confirmed-payment transaction.
         Order order = orderRepository.findByIdForUpdate(orderId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在"));
 
@@ -153,92 +155,9 @@ public class DeliverServiceImpl implements DeliverService {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("order_id", orderId);
 
-        switch (order.getStatus()) {
-            case DELIVERED -> {
-                result.put("status", "DELIVERED");
-                result.put("groups", buildCardKeyGroups(orderId));
-            }
-            case PAID -> {
-                List<OrderItem> items = orderItemRepository.findByOrderId(orderId);
-                // F17: 发货前校验所有订单项数量，异常时立即标记 EXPIRED，防止前端反复重试
-                for (OrderItem item : items) {
-                    if (item.getQuantity() <= 0) {
-                        log.error("Order {} contains item with invalid quantity={}, marking EXPIRED to block retries",
-                                orderId, item.getQuantity());
-                        order.setStatus(OrderStatus.EXPIRED);
-                        orderRepository.save(order);
-                        result.put("status", "EXPIRED");
-                        result.put("groups", List.of());
-                        return result;
-                    }
-                }
-                // 两阶段分配 — 先全部锁定，确认无缺口后才写入。
-                //
-                // 旧实现边锁边写：多品项订单中若后面的品项缺货，抛出的 BusinessException 在本方法内
-                // 就被 catch 掉，从未逸出 @Transactional 边界，Spring 不会标记回滚，前面品项已分配的
-                // 卡密照常提交落库，而订单仍停在 PAID。下次重试会为同一品项再分配一批，
-                // buildCardKeyGroups 依 orderId 取出全部，客户拿到成倍卡密且库存被持续消耗。
-                //
-                // 现在阶段一只做 FOR UPDATE SKIP LOCKED 查询（不产生任何写入），任一品项不足即
-                // 直接返回，事务无写入可提交；阶段二才统一落库，保证全有或全无。
-                Map<OrderItem, List<CardKey>> allocation = new LinkedHashMap<>();
-                OrderItem shortItem = null;
-                for (OrderItem item : items) {
-                    List<CardKey> keys = cardKeyRepository.findAndLockAvailable(
-                            item.getProductId(), item.getSpecId(), item.getQuantity());
-                    if (keys.size() < item.getQuantity()) {
-                        shortItem = item;
-                        break;
-                    }
-                    allocation.put(item, keys);
-                }
-
-                if (shortItem != null) {
-                    log.warn("Deliver deferred for order {}: item {} short of stock (need {}), no card keys allocated",
-                            orderId, shortItem.getProductTitle(), shortItem.getQuantity());
-                    result.put("status", "PAID");
-                    result.put("groups", List.of());
-                    return result;
-                }
-
-                LocalDateTime soldAt = LocalDateTime.now();
-                for (Map.Entry<OrderItem, List<CardKey>> entry : allocation.entrySet()) {
-                    for (CardKey key : entry.getValue()) {
-                        key.setStatus(CardKeyStatus.SOLD);
-                        key.setOrderId(orderId);
-                        key.setOrderItemId(entry.getKey().getId());
-                        key.setSoldAt(soldAt);
-                        cardKeyRepository.save(key);
-                    }
-                }
-
-                order.setStatus(OrderStatus.DELIVERED);
-                order.setDeliveredAt(LocalDateTime.now());
-                orderRepository.save(order);
-
-                // Award points
-                awardPoints(order);
-
-                // Send delivery email after transaction commits (async, non-blocking)
-                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                    @Override
-                    public void afterCommit() {
-                        emailService.sendDeliveryEmail(orderId);
-                    }
-                });
-
-                result.put("status", "DELIVERED");
-                result.put("groups", buildCardKeyGroups(orderId));
-            }
-            case PENDING -> {
-                result.put("status", "PENDING");
-                result.put("groups", List.of());
-            }
-            case EXPIRED -> {
-                result.put("status", "EXPIRED");
-                result.put("groups", List.of());
-            }
-        }
+        result.put("status", order.getStatus().name());
+        result.put("payment_review_reason", order.getPaymentReviewReason());
+        result.put("groups", order.getStatus() == OrderStatus.DELIVERED ? buildCardKeyGroups(orderId) : List.of());
         return result;
     }
 
@@ -254,7 +173,7 @@ public class DeliverServiceImpl implements DeliverService {
             throw new BusinessException(ErrorCode.ORDER_NOT_PAID, "订单未发货");
         }
 
-        List<CardKey> keys = cardKeyRepository.findByOrderId(orderId);
+        List<CardKey> keys = cardKeyRepository.findByOrderId(orderId).stream().filter(k -> k.getStatus() == CardKeyStatus.SOLD).toList();
         List<OrderItem> items = orderItemRepository.findByOrderId(orderId);
         Map<UUID, OrderItem> itemMap = items.stream().collect(Collectors.toMap(OrderItem::getId, i -> i));
 
@@ -282,7 +201,7 @@ public class DeliverServiceImpl implements DeliverService {
     }
 
     private List<Map<String, Object>> buildCardKeyGroups(UUID orderId) {
-        List<CardKey> keys = cardKeyRepository.findByOrderId(orderId);
+        List<CardKey> keys = cardKeyRepository.findByOrderId(orderId).stream().filter(k -> k.getStatus() == CardKeyStatus.SOLD).toList();
         List<OrderItem> items = orderItemRepository.findByOrderId(orderId);
         Map<UUID, OrderItem> itemMap = items.stream().collect(Collectors.toMap(OrderItem::getId, i -> i));
 
@@ -304,36 +223,4 @@ public class DeliverServiceImpl implements DeliverService {
         return groups;
     }
 
-    private void awardPoints(Order order) {
-        if (order.getUserId() == null) return;
-        boolean pointsEnabled = siteConfigRepository.findByConfigKey("points_enabled")
-                .map(c -> "true".equalsIgnoreCase(c.getConfigValue()))
-                .orElse(false);
-        if (!pointsEnabled) return;
-
-        int pointsRate = siteConfigRepository.findByConfigKey("points_rate")
-                .map(c -> { try { return Integer.parseInt(c.getConfigValue()); } catch (Exception e) { return 0; } })
-                .orElse(0);
-        if (pointsRate <= 0) return;
-
-        int pointsEarned = order.getActualAmount().multiply(java.math.BigDecimal.valueOf(pointsRate))
-                .setScale(0, java.math.RoundingMode.FLOOR).intValue();
-        if (pointsEarned <= 0) return;
-
-        // 加行锁读取 —— 同一用户的多笔订单并发发货时，无锁的读改写会丢失更新，
-        // 且 PointsLog.balanceAfter 会与 users.points 实际值不一致。
-        User user = userRepository.findByIdForUpdate(order.getUserId()).orElse(null);
-        if (user == null) return;
-
-        user.setPoints(user.getPoints() + pointsEarned);
-        userRepository.save(user);
-
-        PointsLog log = new PointsLog();
-        log.setUserId(user.getId());
-        log.setChangeAmount(pointsEarned);
-        log.setBalanceAfter(user.getPoints());
-        log.setReason("购物奖励积分");
-        log.setOrderId(order.getId());
-        pointsLogRepository.save(log);
-    }
 }

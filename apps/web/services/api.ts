@@ -376,7 +376,7 @@ export const orderApi = {
   createFromCart: (data: CreateCartOrderRequest) =>
     request<CreateOrderResult>("/orders/from-cart", { method: "POST", body: JSON.stringify(data) }),
   getStatus: (orderId: string) =>
-    request<{ order_id: string; status: OrderStatus; expires_at: string; remaining_seconds: number; payment_url?: string }>(`/orders/${orderId}/status`),
+    request<{ order_id: string; status: OrderStatus; expires_at: string; remaining_seconds: number; payment_processing?: boolean; payment_url?: string }>(`/orders/${orderId}/status`),
   refreshStatus: (orderId: string) =>
     request<{ status: OrderStatus }>(`/orders/${orderId}/refresh`, { method: "POST" }),
   query: (data: { order_ids?: string[]; emails?: string[] }) =>
@@ -546,6 +546,8 @@ export const adminOrderApi = {
   },
   getDetail: (id: string) =>
     request<AdminOrderItem>(`/admin/orders/${id}`),
+  retryDelivery: (id: string) => request<null>(`/admin/orders/${id}/retry-delivery`, { method: "POST" }),
+  recordRefund: (id: string, reference: string) => request<null>(`/admin/orders/${id}/refund-record`, { method: "POST", body: JSON.stringify({ reference }) }),
   markPaid: (id: string) =>
     request<null>(`/admin/orders/${id}/mark-paid`, { method: "POST" }),
 }
@@ -717,4 +719,17 @@ export const adminBusinessApi = {
   list: (params: Record<string, string | number | boolean | undefined>) => request<{ content: BusinessRecord[]; total_elements: number; total_pages: number }>(`/admin/business-records?${buildQuery(params)}`),
   create: (data: BusinessRecordInput) => request<BusinessRecord>("/admin/business-records", { method: "POST", body: JSON.stringify(data) }),
   update: (id: string, data: BusinessRecordInput) => request<BusinessRecord>(`/admin/business-records/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+}
+
+export interface PendingPaymentEvent {
+  id: string
+  order_id: string
+  channel_code: string
+  retry_count: number
+  next_attempt_at: string
+  last_error?: string
+}
+export const adminPaymentInboxApi = {
+  pending: () => request<{ list: PendingPaymentEvent[]; total: number }>("/admin/payment-inbox"),
+  retry: (id: string) => request<boolean>(`/admin/payment-inbox/${id}/retry`, { method: "POST" }),
 }

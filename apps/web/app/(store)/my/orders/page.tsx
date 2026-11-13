@@ -13,7 +13,7 @@ import type { OrderBrief, OrderStatus } from "@/types"
 import type { TranslationKey } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
-const STATUS_FILTERS: (OrderStatus | "ALL")[] = ["ALL", "PENDING", "PAID", "DELIVERED", "EXPIRED"]
+const STATUS_FILTERS: (OrderStatus | "ALL")[] = ["ALL", "PENDING", "PAID", "DELIVERED", "EXPIRED", "PAID_REVIEW", "REFUNDED"]
 
 export default function MyOrdersPage() {
   const { t } = useLocale()
@@ -59,6 +59,8 @@ export default function MyOrdersPage() {
     PAID: "status.PAID",
     DELIVERED: "status.DELIVERED",
     EXPIRED: "status.EXPIRED",
+    PAID_REVIEW: "status.PAID_REVIEW",
+    REFUNDED: "status.REFUNDED",
   }
 
   const getFilterLabel = (s: OrderStatus | "ALL") => {
@@ -108,7 +110,7 @@ export default function MyOrdersPage() {
                   <span className="font-mono text-xs font-medium text-card-foreground">
                     {order.id.length > 20 ? `${order.id.slice(0, 8)}...${order.id.slice(-8)}` : order.id}
                   </span>
-                  <OrderStatusBadge status={order.status} />
+                  <OrderStatusBadge status={order.status} paymentProcessing={order.payment_processing} />
                 </div>
                 <span className="text-xs text-muted-foreground">
                   {new Date(order.created_at).toLocaleString()}
@@ -134,7 +136,7 @@ export default function MyOrdersPage() {
                   </span>
                 </span>
                 <div className="flex gap-2">
-                  {order.status === "PENDING" && order.payment_method && !order.payment_method.startsWith("usdt_") && (
+                  {order.status === "PENDING" && !order.payment_processing && order.payment_method && !order.payment_method.startsWith("usdt_") && (
                     <Link
                       href={`/pay/${order.id}?method=${order.payment_method}`}
                       className="inline-flex h-8 items-center gap-1 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90"

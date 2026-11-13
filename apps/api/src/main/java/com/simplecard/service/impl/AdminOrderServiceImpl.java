@@ -26,6 +26,8 @@ import java.util.*;
 public class AdminOrderServiceImpl implements AdminOrderService {
 
     private final OrderRepository orderRepository;
+    private final com.simplecard.service.PaymentInboxService paymentInbox;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final OrderItemRepository orderItemRepository;
     private final UserRepository userRepository;
 
@@ -60,16 +62,8 @@ public class AdminOrderServiceImpl implements AdminOrderService {
     }
 
     @Override
-    @Transactional
     public void markPaid(UUID id) {
-        Order order = orderRepository.findById(id)
-                .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在"));
-        if (order.getStatus() != OrderStatus.PENDING && order.getStatus() != OrderStatus.EXPIRED) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "仅 PENDING 或 EXPIRED 状态订单可标记为已支付");
-        }
-        order.setStatus(OrderStatus.PAID);
-        order.setPaidAt(LocalDateTime.now());
-        orderRepository.save(order);
+        paymentInbox.accept("manual_"+id,"manual",id,null);
     }
 
     private Map<String, Object> toAdminOrder(Order o) {
@@ -77,7 +71,12 @@ public class AdminOrderServiceImpl implements AdminOrderService {
         map.put("id", o.getId());
         map.put("total_amount", o.getTotalAmount());
         map.put("actual_amount", o.getActualAmount());
+        map.put("currency", "CNY");
+        map.put("payment_currency",o.getPaymentCurrency());
+        map.put("payment_amount",o.getPaymentAmount());
         map.put("status", o.getStatus().name());
+        map.put("payment_review_reason", o.getPaymentReviewReason());
+        map.put("refund_reference", o.getRefundReference());
         map.put("order_type", o.getOrderType().name());
         map.put("payment_method", o.getPaymentMethod());
         map.put("created_at", o.getCreatedAt());
@@ -104,6 +103,9 @@ public class AdminOrderServiceImpl implements AdminOrderService {
             im.put("quantity", i.getQuantity());
             im.put("unit_price", i.getUnitPrice());
             im.put("subtotal", i.getSubtotal());
+            im.put("source_currency",i.getSourceCurrency());
+            im.put("source_unit_price",i.getSourceUnitPrice());
+            im.put("exchange_rate",i.getExchangeRate());
             return im;
         }).toList());
         return map;

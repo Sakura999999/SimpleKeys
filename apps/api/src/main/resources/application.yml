@@ -5,6 +5,8 @@ server:
   forward-headers-strategy: native
 
 spring:
+  config:
+    import: optional:file:./.local-config.properties
   autoconfigure:
     exclude: org.springframework.boot.autoconfigure.security.servlet.UserDetailsServiceAutoConfiguration
   datasource:
@@ -88,3 +90,33 @@ logging:
   level:
     com.simplecard: DEBUG
     org.springframework.security: WARN
+
+coordination:
+  enabled: ${REDIS_COORDINATION_ENABLED:true}
+  address: ${REDIS_ADDRESS:redis://127.0.0.1:6379}
+  password: ${REDIS_PASSWORD:}
+  prefix: ${REDIS_LOCK_PREFIX:simplecard}
+  wait-ms: ${REDIS_LOCK_WAIT_MS:200}
+  watchdog-ms: ${REDIS_LOCK_WATCHDOG_MS:30000}
+
+# Public product lookup protection uses a separate Redis from transaction locks.
+product-guard:
+  enabled: ${PRODUCT_GUARD_ENABLED:true}
+  address: ${PRODUCT_CACHE_REDIS_ADDRESS:redis://127.0.0.1:6380}
+  password: ${PRODUCT_CACHE_REDIS_PASSWORD:}
+  prefix: ${PRODUCT_GUARD_PREFIX:simplecard:product-guard}
+  capacity: ${PRODUCT_BLOOM_CAPACITY:10000}
+  false-probability: ${PRODUCT_BLOOM_FALSE_PROBABILITY:0.001}
+  global-per-second: ${PRODUCT_GUARD_GLOBAL_RPS:300}
+  ip-per-second: ${PRODUCT_GUARD_IP_RPS:30}
+  database-per-second: ${PRODUCT_GUARD_DATABASE_RPS:100}
+  fallback-per-second: ${PRODUCT_GUARD_FALLBACK_RPS:20}
+  database-concurrency: ${PRODUCT_GUARD_DATABASE_CONCURRENCY:8}
+  max-negative-entries: ${PRODUCT_GUARD_MAX_NEGATIVE_ENTRIES:5000}
+  rebuild-ms: ${PRODUCT_BLOOM_REBUILD_MS:3600000}
+  display-cache-enabled: ${PRODUCT_DISPLAY_CACHE_ENABLED:true}
+  display-max-entry-bytes: ${PRODUCT_DISPLAY_MAX_ENTRY_BYTES:16384}
+  display-max-entries: ${PRODUCT_DISPLAY_MAX_ENTRIES:2000}
+  display-max-bytes: ${PRODUCT_DISPLAY_MAX_BYTES:33554432}
+  display-memory-stop-ratio: ${PRODUCT_DISPLAY_MEMORY_STOP_RATIO:0.8}
+  display-wait-ms: ${PRODUCT_DISPLAY_WAIT_MS:100}

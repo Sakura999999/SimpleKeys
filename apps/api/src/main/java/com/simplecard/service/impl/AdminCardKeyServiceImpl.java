@@ -165,10 +165,10 @@ public class AdminCardKeyServiceImpl implements AdminCardKeyService {
     @Override
     @Transactional
     public void invalidateCardKey(UUID id) {
-        CardKey key = cardKeyRepository.findById(id)
+        CardKey key = cardKeyRepository.findByIdForUpdate(id)
                 .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "卡密不存在"));
-        if (key.getStatus() == CardKeyStatus.SOLD) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "已售出的卡密不可作废");
+        if (key.getStatus() == CardKeyStatus.SOLD || key.getStatus() == CardKeyStatus.LOCKED) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "已售出或已预占的卡密不可作废");
         }
         key.setStatus(CardKeyStatus.INVALID);
         cardKeyRepository.save(key);

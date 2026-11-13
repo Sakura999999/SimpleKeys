@@ -14,6 +14,7 @@ import java.util.UUID;
 public class AdminOrderController {
 
     private final AdminOrderService adminOrderService;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
 
     @GetMapping
     public ApiResponse<?> listOrders(
@@ -37,6 +38,19 @@ public class AdminOrderController {
     @PostMapping("/{id}/mark-paid")
     public ApiResponse<Void> markPaid(@PathVariable UUID id) {
         adminOrderService.markPaid(id);
+        return ApiResponse.success();
+    }
+    @LogOperation(action = "order.retry_delivery", targetType = "ORDER", targetId = "#id", detail = "'重试发货'")
+    @PostMapping("/{id}/retry-delivery")
+    public ApiResponse<Void> retryDelivery(@PathVariable UUID id) {
+        inventoryLifecycle.retryDelivery(id);
+        return ApiResponse.success();
+    }
+
+    @LogOperation(action = "order.refund_record", targetType = "ORDER", targetId = "#id", detail = "'登记人工退款'")
+    @PostMapping("/{id}/refund-record")
+    public ApiResponse<Void> refund(@PathVariable UUID id, @RequestBody java.util.Map<String,String> body) {
+        inventoryLifecycle.recordRefund(id, body.get("reference"));
         return ApiResponse.success();
     }
 }

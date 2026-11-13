@@ -38,6 +38,14 @@ services:
     # 容器时区：统一使用北京时间，确保订单时间、日志时间与用户一致
     environment:
       - TZ=Asia/Shanghai
+      - REDIS_ADDRESS=redis://redis:6379
+      - PRODUCT_CACHE_REDIS_ADDRESS=redis://product-cache:6379
+
+    depends_on:
+      redis:
+        condition: service_healthy
+      product-cache:
+        condition: service_healthy
 
     # 从 .env 文件加载环境变量到容器内
     # Spring Boot 的 application.yml 用 ${DB_URL:默认值} 语法读取这些变量
@@ -105,6 +113,38 @@ services:
 
     restart: unless-stopped
 
+  redis:
+    image: redis:7.4-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    command: ["sh", "-c", 'exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
+    volumes:
+      - redis-coordination-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  product-cache:
+    image: redis:7.4-alpine
+    environment:
+      PRODUCT_CACHE_REDIS_PASSWORD: ${PRODUCT_CACHE_REDIS_PASSWORD:?Set PRODUCT_CACHE_REDIS_PASSWORD in .env}
+      REDISCLI_AUTH: ${PRODUCT_CACHE_REDIS_PASSWORD:?Set PRODUCT_CACHE_REDIS_PASSWORD in .env}
+    command: ["sh", "-c", 'exec redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy noeviction --requirepass "$$PRODUCT_CACHE_REDIS_PASSWORD"']
+    volumes:
+      - product-cache-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
 # ── 命名卷（数据持久化） ──
 volumes:
   bepusdt_data:
+  redis-coordination-data:
+  product-cache-data:

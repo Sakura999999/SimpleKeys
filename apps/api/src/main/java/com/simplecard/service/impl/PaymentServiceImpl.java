@@ -41,6 +41,7 @@ public class PaymentServiceImpl implements PaymentService {
 
     private final PaymentChannelRepository paymentChannelRepository;
     private final OrderRepository orderRepository;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final OrderItemRepository orderItemRepository;
     private final EpayService epayService;
     private final BepusdtService bepusdtService;
@@ -54,15 +55,26 @@ public class PaymentServiceImpl implements PaymentService {
 
     @Override
     public Map<String, Object> createPayment(UUID orderId, String paymentMethod, BigDecimal amount, String device) {
+        inventoryLifecycle.close(orderId, false);
+        inventoryLifecycle.reserve(orderId);
+        try { return createPaymentRequest(orderId, paymentMethod, amount, device); }
+        catch (com.simplecard.exception.PaymentRejectedException rejected) {
+            inventoryLifecycle.close(orderId, true);
+            throw rejected;
+        }
+    }
+
+    private Map<String,Object> createPaymentRequest(UUID orderId, String paymentMethod, BigDecimal amount, String device) {
         // 1. 查找渠道并验证已启用
         PaymentChannel channel = paymentChannelRepository.findByChannelCodeAndIsDeleted(paymentMethod, 0)
                 .filter(PaymentChannel::isEnabled)
-                .orElseThrow(() -> new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "支付渠道不可用"));
+                .orElseThrow(() -> new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "支付渠道不可用"));
 
         // 2. 查找订单
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在"));
 
+        requirePending(order);
         // 3. 幂等：已有支付URL直接返回（paymentUrl 或 qrcodeUrl 任一存在即可）
         if ((order.getPaymentUrl() != null && !order.getPaymentUrl().isEmpty())
                 || (order.getQrcodeUrl() != null && !order.getQrcodeUrl().isEmpty())) {
@@ -74,13 +86,15 @@ public class PaymentServiceImpl implements PaymentService {
         String providerType = channel.getProviderType();
         switch (providerType) {
             case "epay" -> createEpayPayment(channel, order, paymentMethod, order.getActualAmount(), device);
-            case "native_alipay" -> throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "原生支付宝支付尚未实现，请使用易支付渠道");
-            case "native_wxpay" -> throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "原生微信支付尚未实现，请使用易支付渠道");
+            case "native_alipay" -> throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "原生支付宝支付尚未实现，请使用易支付渠道");
+            case "native_wxpay" -> throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "原生微信支付尚未实现，请使用易支付渠道");
             case "usdt" -> createBepusdtPayment(channel, order, order.getPaymentAmount() != null ? order.getPaymentAmount() : order.getActualAmount());
-            default -> throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "不支持的支付提供商类型: " + providerType);
+            default -> throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "不支持的支付提供商类型: " + providerType);
         }
 
-        return buildResult(order);
+        Order current = orderRepository.findById(orderId).orElseThrow();
+        requirePending(current);
+        return buildResult(current);
     }
 
     /**
@@ -101,7 +115,7 @@ public class PaymentServiceImpl implements PaymentService {
         order.setUsdtCryptoAmount(result.cryptoAmount());
         order.setUsdtTradeId(result.tradeId());
         order.setUsdtChain(channel.getChannelCode());
-        orderRepository.save(order);
+        inventoryLifecycle.storePaymentDetails(order);
     }
 
     /**
@@ -129,7 +143,7 @@ public class PaymentServiceImpl implements PaymentService {
     private void createEpayPayment(PaymentChannel channel, Order order, String paymentMethod, BigDecimal amount, String device) {
         String epayType = EPAY_TYPE_MAP.get(paymentMethod.toLowerCase());
         if (epayType == null) {
-            throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "该渠道不支持易支付");
+            throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "该渠道不支持易支付");
         }
 
         ChannelConfig config = buildChannelConfig(channel);
@@ -149,7 +163,7 @@ public class PaymentServiceImpl implements PaymentService {
         order.setPaymentUrl(epayResult.payUrl());
         order.setQrcodeUrl(epayResult.qrcodeUrl());
         order.setEpayTradeNo(epayResult.tradeNo());
-        orderRepository.save(order);
+        inventoryLifecycle.storePaymentDetails(order);
     }
 
     /**
@@ -237,8 +251,7 @@ public class PaymentServiceImpl implements PaymentService {
         }
 
         if (order.getExpiresAt().isBefore(java.time.LocalDateTime.now())) {
-            order.setStatus(com.simplecard.constant.OrderStatus.EXPIRED);
-            orderRepository.save(order);
+            inventoryLifecycle.close(orderId, false);
             throw new BusinessException(ErrorCode.ORDER_EXPIRED, "订单已过期");
         }
 
@@ -248,20 +261,21 @@ public class PaymentServiceImpl implements PaymentService {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "操作过于频繁，请稍后再试");
         }
 
-        // 清除旧支付信息，跳过幂等缓存
-        order.setPaymentUrl(null);
-        order.setQrcodeUrl(null);
-        order.setEpayTradeNo(null);
-        orderRepository.save(order);
+        inventoryLifecycle.clearPaymentDetails(orderId);
 
         // 重新创建支付
         return createPayment(order.getId(), order.getPaymentMethod(), order.getActualAmount(), device);
     }
 
+    private static void requirePending(Order order) {
+        if (order.getStatus() != com.simplecard.constant.OrderStatus.PENDING || order.getExpiresAt().isBefore(java.time.LocalDateTime.now()))
+            throw new BusinessException(ErrorCode.ORDER_EXPIRED, "订单已过期或已付款，请查询订单");
+    }
+
     private static String requireConfig(Map<String, String> cfg, String field, String channelCode) {
         String value = cfg.get(field);
         if (value == null || value.isBlank()) {
-            throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE,
+            throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE,
                     "支付渠道 [" + channelCode + "] 缺少必填配置项: " + field + "，请在后台「支付渠道管理」中完善配置");
         }
         return value;

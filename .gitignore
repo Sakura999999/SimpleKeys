@@ -34,6 +34,7 @@ dist/
 .env
 .env.local
 .env.*.local
+.local-config.properties
 *.tsbuildinfo
 
 # Windows reserved names
@@ -42,3 +43,10 @@ NUL
 
 # Uploads
 uploads/
+
+.local-tools/
+
+.local-backups/
+
+# Local agent memory; never publish workspace notes.
+.workbuddy/

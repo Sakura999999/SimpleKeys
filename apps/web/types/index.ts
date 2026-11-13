@@ -135,21 +135,28 @@ export interface CartItem {
 
 export interface Cart {
   items: CartItem[]
-  total_amount: number
+  total_amount: number | null
+  total_currency?: string | null
 }
 
 // ============================================================
 // Order
 // ============================================================
 
-export type OrderStatus = 'PENDING' | 'PAID' | 'DELIVERED' | 'EXPIRED'
+export type OrderStatus = 'PENDING' | 'PAID' | 'DELIVERED' | 'EXPIRED' | 'PAID_REVIEW' | 'REFUNDED'
 
 export type OrderType = 'DIRECT' | 'CART'
 
 export interface OrderBrief {
+  currency?: string
+  payment_currency?: string | null
+  payment_amount?: number | null
   id: string
   total_amount: number
   actual_amount: number
+  payment_processing?: boolean
+  payment_review_reason?: string
+  refund_reference?: string
   status: OrderStatus
   order_type: OrderType
   payment_method: string
@@ -162,6 +169,9 @@ export interface OrderBrief {
 }
 
 export interface OrderItemDetail {
+  source_currency?: string | null
+  source_unit_price?: number | null
+  exchange_rate?: number | null
   id: string
   product_id: string
   product_title: string
@@ -211,6 +221,9 @@ export interface DeliverResultGroup {
 
 export interface DeliverResult {
   order_id: string
+  payment_processing?: boolean
+  payment_review_reason?: string
+  refund_reference?: string
   status: OrderStatus
   groups: DeliverResultGroup[]
 }

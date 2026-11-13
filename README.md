@@ -200,7 +200,7 @@ upload:
 
 ### Option A: Docker (Recommended)
 
-The repo ships a `docker-compose.yml` orchestrating **api / web / bepusdt** containers. **PostgreSQL and Nginx are not included** — bring your own.
+The repo ships a `docker-compose.yml` orchestrating **api / web / redis / bepusdt** containers. **PostgreSQL and Nginx are not included** — bring your own.
 
 Images are published to GHCR; the `:latest` tag tracks the latest release and can be pulled anonymously:
 
@@ -266,3 +266,9 @@ pnpm dev:web
 ## License
 
 [MIT](LICENSE) © 2026 runtimepoet
+
+## Redis coordination
+
+The API enables Redisson order/inventory coordination by default. Configure Redis and a random `REDIS_PASSWORD`. Verified payments are persisted before processing and replayed after Redis recovery. Apply `apps/api/src/main/resources/db/redis-coordination.sql` before deploying the API. See [coordination setup and recovery](docs/redis-coordination.md).
+
+Public product details use a Bloom filter, bounded negative and display caching, request coalescing, and Redisson rebuild locks on a separate `product-cache` Redis. Rebuilds share the existing database limits; prices, visibility and stock remain live database reads with batched inventory statistics. Set a random `PRODUCT_CACHE_REDIS_PASSWORD` and drain old API instances before upgrading. No additional database migration is required. See [product lookup protection](docs/product-query-protection.md).

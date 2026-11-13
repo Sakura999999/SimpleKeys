@@ -18,7 +18,6 @@ import com.simplecard.service.WebhookService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -34,6 +33,8 @@ public class WebhookServiceImpl implements WebhookService {
 
     private final WebhookEventRepository webhookEventRepository;
     private final OrderRepository orderRepository;
+    private final com.simplecard.service.PaymentInboxService paymentInbox;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final PaymentChannelRepository paymentChannelRepository;
     private final EpayService epayService;
     private final BepusdtService bepusdtService;
@@ -42,7 +43,6 @@ public class WebhookServiceImpl implements WebhookService {
     private final TxidVerifyService txidVerifyService;
 
     @Override
-    @Transactional
     public String processEpayCallback(Map<String, String> params) {
         String tradeNo = params.get("trade_no");
         String outTradeNo = params.get("out_trade_no");
@@ -55,11 +55,6 @@ public class WebhookServiceImpl implements WebhookService {
         // Use trade_no as event ID for idempotency
         String eventId = "epay_" + (tradeNo != null ? tradeNo : UUID.randomUUID().toString());
         Optional<WebhookEvent> existingEvent = webhookEventRepository.findByEventId(eventId);
-        if (existingEvent.isPresent()) {
-            log.info("Epay callback already processed: {}", eventId);
-            return "SUCCESS";
-        }
-
         // Step 1: Parse order ID
         UUID orderId;
         try {
@@ -86,7 +81,7 @@ public class WebhookServiceImpl implements WebhookService {
         }
 
         // Step 5: Process payment
-        WebhookEvent event = new WebhookEvent();
+        WebhookEvent event = existingEvent.orElseGet(WebhookEvent::new);
         event.setEventId(eventId);
         event.setChannelCode("epay");
         event.setOrderId(orderId);
@@ -161,24 +156,14 @@ public class WebhookServiceImpl implements WebhookService {
             log.warn("Epay callback: channel config incomplete, skipping server-side query verification for out_trade_no={}", outTradeNo);
         }
 
-        // Step 8: Idempotent update order status
-        if (order.getStatus() == OrderStatus.PENDING) {
-            order.setStatus(OrderStatus.PAID);
-            order.setPaidAt(LocalDateTime.now());
-            orderRepository.save(order);
-            event.setProcessResult("SUCCESS");
-            log.info("Epay callback: order {} marked as PAID", orderId);
-        } else {
-            event.setProcessResult("SKIPPED_" + order.getStatus().name());
-            log.info("Epay callback: order {} already {}", orderId, order.getStatus());
-        }
+        if(tradeNo==null || tradeNo.isBlank()) return "FAIL";
+        paymentInbox.accept(eventId,"epay",orderId,null);
+        // Receipt has committed. Business processing may still be pending Redis recovery.
 
-        webhookEventRepository.save(event);
         return "SUCCESS";
     }
 
     @Override
-    @Transactional
     public String processBepusdtCallback(Map<String, Object> params) {
         // BEpusdt 回调 JSON 含非 String 类型（amount: float64, status: int），
         // 转为 Map<String, String> 用于签名验证（Object.toString() 与 Go 的 fmt.Sprintf("%v", v) 输出一致）
@@ -200,11 +185,6 @@ public class WebhookServiceImpl implements WebhookService {
 
         // 1. 幂等检查
         String eventId = "bepusdt_" + tradeId;
-        if (webhookEventRepository.findByEventId(eventId).isPresent()) {
-            log.info("BEpusdt callback already processed: {}", eventId);
-            return "ok";
-        }
-
         // 2. 解析订单
         UUID orderUuid;
         try {
@@ -303,26 +283,15 @@ public class WebhookServiceImpl implements WebhookService {
             return "ok";
         }
 
-        // 8. 幂等更新订单状态（PENDING 和 EXPIRED 均可标记为 PAID，与 TXID 验证和管理员手动标记行为一致）
-        if (order.getStatus() == OrderStatus.PENDING || order.getStatus() == OrderStatus.EXPIRED) {
-            order.setStatus(OrderStatus.PAID);
-            order.setPaidAt(LocalDateTime.now());
-            order.setUsdtTxId(blockTxId);
-            orderRepository.save(order);
-            saveWebhookEvent(eventId, "usdt", order.getId(), signParams.toString(), "SUCCESS");
-            log.info("BEpusdt callback: order {} marked as PAID, txid={}", orderId, blockTxId);
-        } else {
-            saveWebhookEvent(eventId, "usdt", order.getId(), signParams.toString(),
-                    "SKIPPED_" + order.getStatus().name());
-            log.info("BEpusdt callback: order {} already {}", orderId, order.getStatus());
-        }
+        if(tradeId==null || tradeId.isBlank()) return "fail";
+        paymentInbox.accept(eventId,"usdt",order.getId(),blockTxId);
 
         return "ok";
     }
 
     private void saveWebhookEvent(String eventId, String channelCode, UUID orderId,
                                    String payload, String processResult) {
-        WebhookEvent event = new WebhookEvent();
+        WebhookEvent event = webhookEventRepository.findByEventId(eventId).orElseGet(WebhookEvent::new);
         event.setEventId(eventId);
         event.setChannelCode(channelCode);
         event.setOrderId(orderId != null ? orderId : UUID.fromString("00000000-0000-0000-0000-000000000000"));

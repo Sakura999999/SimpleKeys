@@ -3,6 +3,7 @@ package com.simplecard.exception;
 import com.simplecard.common.ApiResponse;
 import com.simplecard.constant.ErrorCode;
 import lombok.extern.slf4j.Slf4j;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.AccessDeniedException;
@@ -19,8 +20,14 @@ import java.util.stream.Collectors;
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(BusinessException.class)
-    public ResponseEntity<ApiResponse<Void>> handleBusiness(BusinessException e) {
-        log.warn("Business exception: code={}, message={}", e.getCode(), e.getMessage());
+    public ResponseEntity<ApiResponse<Void>> handleBusiness(BusinessException e, HttpServletRequest request) {
+        // Expected public lookup rejections are counted by the guard; avoid attack-driven log floods.
+        boolean publicProduct = "GET".equals(request.getMethod())
+                && request.getRequestURI().startsWith(request.getContextPath() + "/products/");
+        boolean expectedRejection = e.getCode() == ErrorCode.PRODUCT_NOT_FOUND
+                || e.getCode() == ErrorCode.TOO_MANY_REQUESTS || e.getCode() == ErrorCode.MAINTENANCE;
+        if (!publicProduct || !expectedRejection)
+            log.warn("Business exception: code={}, message={}", e.getCode(), e.getMessage());
         return ResponseEntity.status(e.getHttpStatus())
                 .body(ApiResponse.error(e.getCode(), e.getMessage(), e.getParams()));
     }

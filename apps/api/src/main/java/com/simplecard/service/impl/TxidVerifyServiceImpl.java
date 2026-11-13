@@ -31,6 +31,8 @@ import java.util.Set;
 public class TxidVerifyServiceImpl implements TxidVerifyService {
 
     private final OrderRepository orderRepository;
+    private final com.simplecard.service.PaymentInboxService paymentInbox;
+    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final UnmatchedTransactionRepository unmatchedTransactionRepository;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -63,7 +65,6 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
     private static final long TX_TIME_BUFFER_SECONDS = 120;
 
     @Override
-    @Transactional
     public VerifyDetail verifyAndProcess(Order order, String txid) {
         String chain = order.getUsdtChain();
 
@@ -137,11 +138,9 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
 
         if (diff.compareTo(BigDecimal.ZERO) == 0) {
             // 精确匹配 → 自动通过，TXID UNIQUE 约束兜底防并发
-            order.setStatus(OrderStatus.PAID);
-            order.setPaidAt(LocalDateTime.now());
-            order.setUsdtTxId(txid);
+
             try {
-                orderRepository.saveAndFlush(order);
+                paymentInbox.accept("txid_"+chain+"_"+txid,"txid",order.getId(),txid);
             } catch (org.springframework.dao.DataIntegrityViolationException e) {
                 // TXID 已被 webhook 或其他请求抢先写入（UNIQUE 约束冲突）
                 // flush 失败后 Hibernate Session 不一致，不能正常 return（Spring 的 commit 会抛异常），
