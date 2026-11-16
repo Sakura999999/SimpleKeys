@@ -19,14 +19,20 @@ import java.util.stream.Collectors;
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
+    @ExceptionHandler({org.springframework.http.converter.HttpMessageNotReadableException.class,
+            org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class})
+    public ResponseEntity<ApiResponse<Void>> handleMalformedInput(Exception e) {
+        return ResponseEntity.badRequest().body(ApiResponse.error(ErrorCode.BAD_REQUEST,"请求参数格式错误"));
+    }
+
     @ExceptionHandler(BusinessException.class)
     public ResponseEntity<ApiResponse<Void>> handleBusiness(BusinessException e, HttpServletRequest request) {
         // Expected public lookup rejections are counted by the guard; avoid attack-driven log floods.
         boolean publicProduct = "GET".equals(request.getMethod())
-                && request.getRequestURI().startsWith(request.getContextPath() + "/products/");
+                && com.simplecard.config.RequestPaths.application(request).startsWith("/products/");
         boolean expectedRejection = e.getCode() == ErrorCode.PRODUCT_NOT_FOUND
                 || e.getCode() == ErrorCode.TOO_MANY_REQUESTS || e.getCode() == ErrorCode.MAINTENANCE;
-        if (!publicProduct || !expectedRejection)
+        if (e.getCode()!=ErrorCode.TOO_MANY_REQUESTS && (!publicProduct || !expectedRejection))
             log.warn("Business exception: code={}, message={}", e.getCode(), e.getMessage());
         return ResponseEntity.status(e.getHttpStatus())
                 .body(ApiResponse.error(e.getCode(), e.getMessage(), e.getParams()));

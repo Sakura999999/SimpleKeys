@@ -68,7 +68,7 @@ public class AuthServiceImpl implements AuthService {
     }
 
     /** 连续登录失败上限的兜底值 —— 实际以后台 login_attempt_limit 配置为准 */
-    private static final int DEFAULT_MAX_FAILED_ATTEMPTS = 5;
+    private static final int DEFAULT_MAX_FAILED_ATTEMPTS = 10;
     /** 账户锁定时长（分钟） */
     private static final int LOCK_DURATION_MINUTES = 15;
 
@@ -95,7 +95,7 @@ public class AuthServiceImpl implements AuthService {
     @Override
     @Transactional(noRollbackFor = BusinessException.class)
     public AuthResponse login(LoginRequest request, String sessionToken) {
-        User user = userRepository.findByUsernameOrEmail(request.getAccount(), request.getAccount())
+        User user = userRepository.findLoginForUpdate(request.getAccount())
                 .orElseThrow(() -> new BusinessException(ErrorCode.INVALID_CREDENTIALS, "用户名或密码错误"));
 
         if (user.getIsDeleted() == 1) {

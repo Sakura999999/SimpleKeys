@@ -73,6 +73,10 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
         try {
             tx = queryTransaction(chain, txid);
         } catch (Exception e) {
+            if (e instanceof org.springframework.web.client.HttpStatusCodeException http && http.getStatusCode().value()==429)
+                throw new BusinessException(ErrorCode.TOO_MANY_REQUESTS,"链上查询繁忙，请稍后重试",org.springframework.http.HttpStatus.TOO_MANY_REQUESTS);
+            if (e instanceof org.springframework.web.client.RestClientException)
+                throw new BusinessException(ErrorCode.MAINTENANCE,"链上查询暂不可用，请稍后重试",org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE);
             log.error("链上 API 查询失败: chain={}, txid={}, error={}", chain, txid, e.getMessage());
             saveUnmatched(order, txid, chain, VerifyResult.PENDING_REVIEW,
                     "CHAIN_API_ERROR", null, null, null);

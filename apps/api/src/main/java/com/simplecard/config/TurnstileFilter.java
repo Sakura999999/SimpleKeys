@@ -37,6 +37,7 @@ public class TurnstileFilter implements Filter {
 
     private final SiteConfigRepository siteConfigRepository;
     private final ObjectMapper objectMapper;
+    private final ClientIpResolver clientIpResolver;
 
     @Value("${turnstile.secret-key:}")
     private String secretKey;
@@ -53,10 +54,10 @@ public class TurnstileFilter implements Filter {
      * 这些路径已有设备指纹限流（query: 20次/h, txid: 5次/h + 3次/24h/订单）保护。
      */
     private static final Set<String> EXACT_PATHS = Set.of(
-            "/api/orders",
-            "/api/orders/from-cart",
-            "/api/auth/login",
-            "/api/auth/register"
+            "/orders",
+            "/orders/from-cart",
+            "/auth/login",
+            "/auth/register"
     );
 
     /** 开关配置缓存（60 秒刷新） */
@@ -67,7 +68,7 @@ public class TurnstileFilter implements Filter {
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
             throws IOException, ServletException {
         HttpServletRequest httpRequest = (HttpServletRequest) request;
-        String path = httpRequest.getRequestURI();
+        String path = RequestPaths.application(httpRequest);
         String method = httpRequest.getMethod();
 
         // 仅拦截匹配的敏感路径
@@ -84,6 +85,12 @@ public class TurnstileFilter implements Filter {
 
         // Secret Key 未配置 → 降级放行
         if (secretKey == null || secretKey.isBlank()) {
+            if (path.endsWith("/auth/register")) {
+                ((HttpServletResponse) response).setStatus(503);
+                response.setContentType("application/json;charset=UTF-8");
+                objectMapper.writeValue(response.getWriter(),ApiResponse.error(ErrorCode.MAINTENANCE,"注册验证配置未就绪，请稍后重试"));
+                return;
+            }
             log.warn("Turnstile secret key not configured, skipping verification for path={}", path);
             chain.doFilter(request, response);
             return;
@@ -98,7 +105,7 @@ public class TurnstileFilter implements Filter {
         }
 
         // 调用 Cloudflare siteverify
-        boolean verified = verifySiteverify(token, httpRequest.getRemoteAddr());
+        boolean verified = verifySiteverify(token, clientIpResolver.resolve(httpRequest),path.endsWith("/auth/register"));
         if (!verified) {
             log.info("Turnstile verification failed: path={}, ip={}", path, httpRequest.getRemoteAddr());
             reject(response, "人机验证失败，请刷新页面后重试");
@@ -124,7 +131,7 @@ public class TurnstileFilter implements Filter {
     }
     private final RestTemplate turnstileRestTemplate = createTurnstileRestTemplate();
 
-    private boolean verifySiteverify(String token, String remoteIp) {
+    private boolean verifySiteverify(String token, String remoteIp,boolean strict) {
         try {
             // Cloudflare siteverify 要求 application/x-www-form-urlencoded 格式
             org.springframework.util.MultiValueMap<String, String> formData = new org.springframework.util.LinkedMultiValueMap<>();
@@ -141,8 +148,8 @@ public class TurnstileFilter implements Filter {
 
             String responseBody = turnstileRestTemplate.postForObject(SITEVERIFY_URL, request, String.class);
             if (responseBody == null) {
-                log.warn("Turnstile siteverify returned null, degrading to allow");
-                return true;
+                log.warn("Turnstile siteverify returned null (registrationStrict={})",strict);
+                return !strict;
             }
 
             Map<String, Object> result = objectMapper.readValue(responseBody, new TypeReference<>() {});
@@ -154,8 +161,8 @@ public class TurnstileFilter implements Filter {
             return true;
         } catch (Exception e) {
             // Cloudflare API 不可用 → 降级放行
-            log.warn("Turnstile siteverify call failed (degrading to allow): {}", e.getMessage());
-            return true;
+            log.warn("Turnstile siteverify failed (registrationStrict={}, type={})",strict,e.getClass().getSimpleName());
+            return !strict;
         }
     }
 

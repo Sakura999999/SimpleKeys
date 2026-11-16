@@ -89,10 +89,10 @@ public class WebhookIpFilter implements Filter {
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
             throws IOException, ServletException {
         HttpServletRequest httpRequest = (HttpServletRequest) request;
-        String path = httpRequest.getRequestURI();
+        String path = RequestPaths.application(httpRequest);
 
         // 仅拦截 webhook 路径
-        if (path.startsWith("/api/payments/webhook")) {
+        if (path.startsWith("/payments/webhook")) {
             Set<String> ips = getStaticIps();
             Set<String> domainIps = getResolvedDomainIps();
             boolean filterEnabled = !ips.isEmpty() || !domainIps.isEmpty();

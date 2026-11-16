@@ -109,12 +109,9 @@ public class ProductProtectionStore {
     /** Exact sliding windows; peer keys are allocated only after global admission, bounding key growth. */
     public boolean admit(String scope, String peer, int globalLimit, int peerLimit) {
         String member = UUID.randomUUID().toString();
-        return eval("local t=redis.call('TIME'); local now=t[1]*1000+math.floor(t[2]/1000); " +
-                        "for i=1,2 do redis.call('ZREMRANGEBYSCORE',KEYS[i],'-inf',now-1000) end; " +
-                        "if redis.call('ZCARD',KEYS[1])>=tonumber(ARGV[1]) or redis.call('ZCARD',KEYS[2])>=tonumber(ARGV[2]) then return 0 end; " +
-                        "for i=1,2 do redis.call('ZADD',KEYS[i],now,ARGV[3]); redis.call('PEXPIRE',KEYS[i],2000) end; return 1",
-                RScript.ReturnType.INTEGER, List.of(key("rate:" + scope), key("rate:" + scope + ":" + peer)),
-                globalLimit, peerLimit, member).equals(1L);
+        return eval(SlidingWindowScript.LUA, RScript.ReturnType.INTEGER,
+                List.of(key("rate:" + scope), key("rate:" + scope + ":" + peer)),
+                globalLimit, peerLimit, member, 1000).equals(1L);
     }
     public RLock rebuildLock() { return client().getLock(key("rebuild-lock")); }
     public RLock displayLock(UUID id) { return client().getLock(key("display-lock:" + id)); }

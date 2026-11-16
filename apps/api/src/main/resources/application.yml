@@ -2,7 +2,7 @@ server:
   port: 8083
   servlet:
     context-path: /api
-  forward-headers-strategy: native
+  forward-headers-strategy: none
 
 spring:
   config:
@@ -120,3 +120,16 @@ product-guard:
   display-max-bytes: ${PRODUCT_DISPLAY_MAX_BYTES:33554432}
   display-memory-stop-ratio: ${PRODUCT_DISPLAY_MEMORY_STOP_RATIO:0.8}
   display-wait-ms: ${PRODUCT_DISPLAY_WAIT_MS:100}
+
+# Dedicated limiter instance, separate from order locks and public-product caching.
+api-rate-limit:
+  enabled: ${API_RATE_LIMIT_ENABLED:true}
+  shadow: ${API_RATE_LIMIT_SHADOW:false}
+  address: ${API_LIMIT_REDIS_ADDRESS:redis://127.0.0.1:6390}
+  password: ${API_LIMIT_REDIS_PASSWORD:}
+  prefix: ${API_LIMIT_PREFIX:simplecard:api-limits}
+  max-peers: ${API_LIMIT_MAX_PEERS:5000}
+  memory-stop-ratio: ${API_LIMIT_MEMORY_STOP_RATIO:0.75}
+webhook-guard:
+  per-second: ${WEBHOOK_GUARD_RPS:100}
+  concurrency: ${WEBHOOK_GUARD_CONCURRENCY:16}

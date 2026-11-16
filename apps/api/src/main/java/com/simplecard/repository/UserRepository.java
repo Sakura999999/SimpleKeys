@@ -29,6 +29,10 @@ public interface UserRepository extends JpaRepository<User, UUID> {
 
     Optional<User> findByUsernameOrEmail(String username, String email);
 
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select u from User u where u.username=:account or u.email=:account")
+    Optional<User> findLoginForUpdate(@Param("account") String account);
+
     boolean existsByUsername(String username);
 
     boolean existsByEmail(String email);

@@ -18,6 +18,11 @@ import java.util.Optional;
 import java.util.UUID;
 
 public interface OrderRepository extends JpaRepository<Order, UUID> {
+
+    @Query("select o from Order o where o.email in :emails and (:admin=true or " +
+            "(:userId is not null and o.userId=:userId) or (o.userId is null and :token is not null and o.sessionToken=:token))")
+    List<Order> findAccessibleEmails(@Param("emails") java.util.Collection<String> emails,@Param("userId") UUID userId,
+            @Param("token") String token,@Param("admin") boolean admin,org.springframework.data.domain.Pageable pageable);
     List<Order> findByStatusOrderByCreatedAtAsc(OrderStatus status);
 
     Optional<Order> findByIdempotencyKey(String idempotencyKey);

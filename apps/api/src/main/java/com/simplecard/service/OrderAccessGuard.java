@@ -28,6 +28,12 @@ import java.util.UUID;
 @Component
 public class OrderAccessGuard {
 
+    /** External-cost actions require proof of ownership, not just a leaked guest order UUID. */
+    public void assertSensitiveAccess(Order order,String callerSessionToken) {
+        if (!ownsOrder(order,callerSessionToken))
+            throw new BusinessException(ErrorCode.FORBIDDEN,"请使用原下单账号或浏览器操作，旧订单可联系管理员处理",HttpStatus.FORBIDDEN);
+    }
+
     /** 当前请求是否由管理员发起 */
     public boolean isAdmin() {
         return UserRole.ADMIN.name().equals(RequestContext.getRole());

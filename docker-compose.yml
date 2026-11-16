@@ -40,11 +40,15 @@ services:
       - TZ=Asia/Shanghai
       - REDIS_ADDRESS=redis://redis:6379
       - PRODUCT_CACHE_REDIS_ADDRESS=redis://product-cache:6379
+      - API_LIMIT_REDIS_ADDRESS=redis://api-limiter:6379
+      - RATE_LIMIT_TRUSTED_PROXIES=${RATE_LIMIT_TRUSTED_PROXIES:?Set exact trusted reverse proxy addresses}
 
     depends_on:
       redis:
         condition: service_healthy
       product-cache:
+        condition: service_healthy
+      api-limiter:
         condition: service_healthy
 
     # 从 .env 文件加载环境变量到容器内
@@ -118,7 +122,7 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
       REDISCLI_AUTH: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
-    command: ["sh", "-c", 'exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
+    command: ["sh", "-c", 'exec redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"']
     volumes:
       - redis-coordination-data:/data
     healthcheck:
@@ -143,8 +147,24 @@ services:
       retries: 10
     restart: unless-stopped
 
+  api-limiter:
+    image: redis:7.4-alpine
+    environment:
+      API_LIMIT_REDIS_PASSWORD: ${API_LIMIT_REDIS_PASSWORD:?Set API_LIMIT_REDIS_PASSWORD in .env}
+      REDISCLI_AUTH: ${API_LIMIT_REDIS_PASSWORD:?Set API_LIMIT_REDIS_PASSWORD in .env}
+    command: ["sh", "-c", 'exec redis-server --appendonly yes --maxmemory 64mb --maxmemory-policy noeviction --requirepass "$$API_LIMIT_REDIS_PASSWORD"']
+    volumes:
+      - api-limiter-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
 # ── 命名卷（数据持久化） ──
 volumes:
   bepusdt_data:
   redis-coordination-data:
   product-cache-data:
+  api-limiter-data:

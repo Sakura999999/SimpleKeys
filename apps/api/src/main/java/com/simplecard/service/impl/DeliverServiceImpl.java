@@ -29,15 +29,20 @@ public class DeliverServiceImpl implements DeliverService {
     private final CardKeyRepository cardKeyRepository;
     private final UnmatchedTransactionRepository unmatchedTransactionRepository;
     private final OrderAccessGuard orderAccessGuard;
+    private final com.simplecard.service.ApiTrafficLimiter trafficLimiter;
+    private final com.simplecard.service.SensitiveExportAudit exportAudit;
 
     @Override
     @SuppressWarnings("unchecked")
     public List<?> queryOrders(Map<String, Object> request, String callerSessionToken) {
+        var boundedIds=com.simplecard.service.PublicRequestBounds.strings(request,"order_ids",50,36);
+        var boundedEmails=com.simplecard.service.PublicRequestBounds.strings(request,"emails",10,254);
+        if (boundedIds.size()+boundedEmails.size()>50) throw com.simplecard.service.PublicRequestBounds.bad();
         List<Order> orders = new ArrayList<>();
         Set<UUID> seen = new LinkedHashSet<>();
 
         // 按订单号查询：订单号是能力凭证，但属于注册账号的订单仍需本人身份
-        List<String> orderIdStrs = (List<String>) request.get("order_ids");
+        List<String> orderIdStrs = boundedIds;
         if (orderIdStrs != null) {
             for (String idStr : orderIdStrs) {
                 UUID id = parseOrderId(idStr);
@@ -52,9 +57,11 @@ public class DeliverServiceImpl implements DeliverService {
         // 按邮箱查询：邮箱不是身份凭证，只作为过滤条件。
         // 仅返回调用方能证明归属的订单，否则此路径会变成订单号枚举入口（可进而通过
         // /orders/deliver 取得他人卡密）。跨设备邮箱查单需邮箱验证码，尚未实现。
-        List<String> emails = (List<String>) request.get("emails");
+        List<String> emails = boundedEmails;
         if (emails != null && !emails.isEmpty()) {
-            List<Order> emailOrders = orderRepository.findByEmailInOrderByCreatedAtDesc(emails);
+            List<Order> emailOrders = orderRepository.findAccessibleEmails(emails,com.simplecard.context.RequestContext.getUserId(),
+                    callerSessionToken,orderAccessGuard.isAdmin(),org.springframework.data.domain.PageRequest.of(0,100,
+                    org.springframework.data.domain.Sort.by("createdAt").descending()));
             for (Order o : emailOrders) {
                 if (!orderAccessGuard.ownsOrder(o, callerSessionToken)) continue;
                 if (!seen.add(o.getId())) continue;
@@ -118,7 +125,7 @@ public class DeliverServiceImpl implements DeliverService {
     @SuppressWarnings("unchecked")
     @Transactional
     public List<?> deliverOrders(Map<String, Object> request, String callerSessionToken) {
-        List<String> orderIdStrs = (List<String>) request.get("order_ids");
+        List<String> orderIdStrs = com.simplecard.service.PublicRequestBounds.strings(request,"order_ids",50,36);
         if (orderIdStrs == null || orderIdStrs.isEmpty()) {
             throw new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在");
         }
@@ -168,6 +175,7 @@ public class DeliverServiceImpl implements DeliverService {
 
         // 授权校验 — 此端点直接下载卡密全文，此前完全没有归属检查
         orderAccessGuard.assertAccess(order, callerSessionToken);
+        trafficLimiter.order("export",orderId,false);
 
         if (order.getStatus() != OrderStatus.DELIVERED) {
             throw new BusinessException(ErrorCode.ORDER_NOT_PAID, "订单未发货");
@@ -197,6 +205,7 @@ public class DeliverServiceImpl implements DeliverService {
                 sb.append("\n");
             }
         }
+        exportAudit.prepared(orderId,keys.size());
         return sb.toString();
     }
 

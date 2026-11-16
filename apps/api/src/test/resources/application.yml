@@ -41,3 +41,6 @@ payment-inbox:
 
 product-guard:
   enabled: false
+
+api-rate-limit:
+  enabled: false

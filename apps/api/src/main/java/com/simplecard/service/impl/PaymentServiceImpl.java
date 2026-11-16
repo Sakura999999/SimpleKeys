@@ -47,6 +47,7 @@ public class PaymentServiceImpl implements PaymentService {
     private final BepusdtService bepusdtService;
     private final ObjectMapper objectMapper;
     private final OrderAccessGuard orderAccessGuard;
+    private final com.simplecard.service.ApiTrafficLimiter trafficLimiter;
 
     @Override
     public Map<String, Object> createPayment(UUID orderId, String paymentMethod, BigDecimal amount) {
@@ -244,7 +245,7 @@ public class PaymentServiceImpl implements PaymentService {
         // F9: 归属校验 — 交由 OrderAccessGuard 统一执行。
         // 旧实现的条件含 requestUserId != null，未登录请求会整段跳过校验，
         // 而 /orders/*/repay 为 permitAll，任何人都能反复重建他人订单的支付链接。
-        orderAccessGuard.assertAccess(order, callerSessionToken);
+        orderAccessGuard.assertSensitiveAccess(order, callerSessionToken);
 
         if (order.getStatus() != com.simplecard.constant.OrderStatus.PENDING) {
             throw new BusinessException(ErrorCode.ORDER_EXPIRED, "订单状态不允许重新支付");
@@ -261,6 +262,7 @@ public class PaymentServiceImpl implements PaymentService {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "操作过于频繁，请稍后再试");
         }
 
+        trafficLimiter.external("repay-upstream","repay-order",orderId,1);
         inventoryLifecycle.clearPaymentDetails(orderId);
 
         // 重新创建支付

@@ -44,38 +44,62 @@ public class ClientIpResolver {
             Set<String> set = ConcurrentHashMap.newKeySet();
             if (trustedProxiesConfig != null) {
                 for (String ip : trustedProxiesConfig.split(",")) {
-                    String trimmed = ip.trim();
-                    if (!trimmed.isEmpty()) set.add(trimmed);
+                    if(ip.isBlank())continue;
+                    String trimmed = normalize(ip);
+                    if(trimmed==null)throw new IllegalArgumentException("Trusted proxies require exact numeric IP addresses");
+                    set.add(trimmed);
                 }
             }
             trustedProxies = set;
         }
         return trustedProxies;
     }
+    @jakarta.annotation.PostConstruct
+    public void validateConfiguration() { getTrustedProxies(); }
 
     /** 解析指定请求的客户端真实 IP。 */
     public String resolve(HttpServletRequest request) {
-        String remoteAddr = request.getRemoteAddr();
+        String remoteAddr = normalize(request.getRemoteAddr());
+        if (remoteAddr==null) return "unknown";
 
         if (getTrustedProxies().contains(remoteAddr)) {
             String realIp = request.getHeader("X-Real-IP");
-            if (StringUtils.hasText(realIp)) {
-                return realIp.trim();
+            if (normalize(realIp)!=null) {
+                return normalize(realIp);
             }
             String xff = request.getHeader("X-Forwarded-For");
             if (StringUtils.hasText(xff)) {
                 String[] parts = xff.split(",");
+                if (parts.length>20) return remoteAddr;
                 for (int i = parts.length - 1; i >= 0; i--) {
-                    String ip = parts[i].trim();
+                    String ip = normalize(parts[i]);
+                    if (ip==null) return remoteAddr;
                     if (!ip.isEmpty() && !getTrustedProxies().contains(ip)) {
                         return ip;
                     }
                 }
-                return parts[0].trim();
+                return normalize(parts[0]);
             }
         }
 
         return remoteAddr;
+    }
+    private static String normalize(String raw) {
+        if(raw==null)return null;String value=raw.trim();
+        if(value.isEmpty() || value.length()>45)return null;
+        try {
+            if(value.contains(":")) {
+                if(!value.matches("[0-9a-fA-F:.]+"))return null;
+                return java.net.InetAddress.getByName(value).getHostAddress(); // numeric only, never resolves hostnames
+            }
+            String[] pieces=value.split("\\.",-1);if(pieces.length!=4)return null;
+            StringBuilder result=new StringBuilder();
+            for(String piece:pieces) {
+                if(!piece.matches("[0-9]{1,3}"))return null;int n=Integer.parseInt(piece);if(n>255)return null;
+                if(!result.isEmpty())result.append('.');result.append(n);
+            }
+            return result.toString();
+        } catch(Exception e) { return null; }
     }
 
     /**

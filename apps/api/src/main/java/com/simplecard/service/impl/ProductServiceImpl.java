@@ -40,6 +40,7 @@ public class ProductServiceImpl implements ProductService {
 
     @Override
     public PageResult<?> listPublicProducts(UUID categoryId, String keyword, int page, int pageSize) {
+        com.simplecard.service.PublicRequestBounds.pagination(page,pageSize,keyword);
         var pageable = PageRequest.of(page - 1, pageSize,
                 Sort.by("sortOrder").ascending().and(Sort.by("createdAt").descending()));
         Page<Product> productPage;

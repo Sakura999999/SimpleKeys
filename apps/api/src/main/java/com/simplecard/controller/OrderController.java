@@ -33,6 +33,9 @@ public class OrderController {
     private final TxidVerifyService txidVerifyService;
     private final com.simplecard.service.PaymentService paymentService;
     private final com.simplecard.config.ClientIpResolver clientIpResolver;
+    private final com.simplecard.service.OrderAccessGuard orderAccessGuard;
+    private final com.simplecard.service.ApiTrafficLimiter trafficLimiter;
+    private final com.simplecard.repository.SiteConfigRepository riskConfigs;
 
     @PostMapping("/quote")
     public ApiResponse<?> quote(@RequestBody Map<String,Object> request,
@@ -81,12 +84,18 @@ public class OrderController {
     }
 
     @GetMapping("/{id}/status")
-    public ApiResponse<?> getOrderStatus(@PathVariable UUID id) {
+    public ApiResponse<?> getOrderStatus(@PathVariable UUID id,
+            @RequestHeader(value="X-Session-Token",required=false) String sessionToken) {
+        assertOrderAccess(id,sessionToken);
+        trafficLimiter.order("status",id,false);
         return ApiResponse.success(orderService.getOrderStatus(id));
     }
 
     @PostMapping("/{id}/refresh")
-    public ApiResponse<?> refreshOrderStatus(@PathVariable UUID id) {
+    public ApiResponse<?> refreshOrderStatus(@PathVariable UUID id,
+            @RequestHeader(value="X-Session-Token",required=false) String sessionToken) {
+        assertOrderAccess(id,sessionToken);
+        trafficLimiter.order("refresh",id,false);
         return ApiResponse.success(orderService.refreshOrderStatus(id));
     }
 
@@ -108,6 +117,9 @@ public class OrderController {
                                HttpServletResponse response) throws Exception {
         String content = deliverService.exportCardKeys(id, sessionToken);
         response.setContentType("text/plain; charset=UTF-8");
+        response.setHeader("Cache-Control","no-store, private");
+        response.setHeader("Pragma","no-cache");
+        response.setHeader("Referrer-Policy","no-referrer");
         response.setHeader("Content-Disposition", "attachment; filename=card-keys-" + id + ".txt");
         response.getWriter().write(content);
     }
@@ -128,7 +140,8 @@ public class OrderController {
      */
     @PostMapping("/{id}/txid-verify")
     public ApiResponse<?> submitTxidForVerification(@PathVariable UUID id,
-                                                     @RequestBody Map<String, String> request) {
+            @RequestBody Map<String, String> request,
+            @RequestHeader(value="X-Session-Token",required=false) String sessionToken) {
         String txid = request.get("txid");
         if (txid == null || txid.isBlank()) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "请提供交易哈希（TXID）");
@@ -138,6 +151,7 @@ public class OrderController {
         // 1. 校验订单存在
         Order order = orderRepository.findById(id)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在"));
+        orderAccessGuard.assertSensitiveAccess(order,sessionToken);
 
         // 2. 校验订单状态为 PENDING 或 EXPIRED
         if (order.getStatus() != OrderStatus.PENDING && order.getStatus() != OrderStatus.EXPIRED) {
@@ -161,6 +175,11 @@ public class OrderController {
         }
 
         // 6. 调用自动审核
+        int quota=riskConfigs.findByConfigKey("txid_submit_limit_per_order").map(c->{
+            try { int value=Integer.parseInt(c.getConfigValue());return value>0 && value<=20?value:3; }
+            catch(Exception e) { return 3; }
+        }).orElse(3);
+        trafficLimiter.external("txid-upstream","txid-order",id,quota);
         TxidVerifyService.VerifyDetail detail = txidVerifyService.verifyAndProcess(order, txid);
 
         Map<String, Object> data = new LinkedHashMap<>();
@@ -181,5 +200,9 @@ public class OrderController {
                 throw new BusinessException(ErrorCode.TXID_INVALID_FORMAT, "TXID 格式不正确，BEP-20 交易哈希应为 0x 开头的 66 位十六进制字符");
             }
         }
+    }
+    private void assertOrderAccess(UUID id,String token) {
+        orderAccessGuard.assertAccess(orderRepository.findById(id)
+                .orElseThrow(()->new BusinessException(ErrorCode.ORDER_NOT_FOUND,"订单不存在")),token);
     }
 }

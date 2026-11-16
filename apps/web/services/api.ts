@@ -115,7 +115,9 @@ function handleUnauthorized() {
 
 function getSessionToken(): string | null {
   if (typeof window === "undefined") return null
-  return localStorage.getItem("session_token")
+  let token = localStorage.getItem("session_token")
+  if (!token) { token = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Array.from(crypto.getRandomValues(new Uint8Array(32)), b => b.toString(16).padStart(2, "0")).join(""); localStorage.setItem("session_token", token) }
+  return token
 }
 
 function setSessionToken(token: string) {

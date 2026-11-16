@@ -32,7 +32,7 @@ public class RateLimitFilter implements Filter {
     private final Map<String, TokenBucket> loginBuckets = new ConcurrentHashMap<>();
 
     // Cache: rate limit config, refresh every 60s
-    private volatile int cachedRateLimit = 20;
+    private volatile int cachedRateLimit = 25;
     private volatile long cacheExpiry = 0;
 
     /** 登录端点限制：每分钟 5 次 */
@@ -40,17 +40,17 @@ public class RateLimitFilter implements Filter {
 
     /** 敏感端点路径 */
     private static final Set<String> LOGIN_PATHS = Set.of(
-            "/api/auth/login", "/api/auth/register"
+            "/auth/login", "/auth/register"
     );
 
     @Override
     public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
             throws IOException, ServletException {
         HttpServletRequest httpRequest = (HttpServletRequest) request;
-        String path = httpRequest.getRequestURI();
+        String path = RequestPaths.application(httpRequest);
 
         // F21: 仅跳过静态资源（上传文件服务），admin 端点纳入限流（防止暴力攻击）
-        if (path.startsWith("/api/uploads")) {
+        if (path.startsWith("/uploads") || path.startsWith("/payments/webhook/")) {
             chain.doFilter(request, response);
             return;
         }
@@ -60,9 +60,10 @@ public class RateLimitFilter implements Filter {
         // 登录/注册端点：独立的更严格限流（每分钟 LOGIN_RATE_PER_MINUTE 次）
         if (LOGIN_PATHS.contains(path)) {
             String loginKey = "login:" + clientIp;
-            TokenBucket loginBucket = loginBuckets.computeIfAbsent(loginKey,
-                    k -> new TokenBucket(LOGIN_RATE_PER_MINUTE, 60_000));
-            if (!loginBucket.tryConsume()) {
+            TokenBucket loginBucket = com.simplecard.service.BoundedBuckets.get(loginBuckets,loginKey,5000,
+                    () -> new TokenBucket(LOGIN_RATE_PER_MINUTE,60000),
+                    bucket -> System.nanoTime()/1000000L-bucket.lastAccess>120000);
+            if (loginBucket==null || !loginBucket.tryConsume()) {
                 rejectTooManyRequests(response, "登录请求过于频繁，请稍后再试");
                 return;
             }
@@ -73,8 +74,9 @@ public class RateLimitFilter implements Filter {
         // 首次创建时的值：管理员遭遇攻击时把 rate_limit_per_second 调低，正在攻击的 IP
         // 因桶已存在而完全不受影响，收紧限流形同虚设。
         int rateLimit = getRateLimit();
-        TokenBucket bucket = buckets.computeIfAbsent(clientIp, k -> new TokenBucket(rateLimit));
-        if (!bucket.tryConsume(rateLimit)) {
+        TokenBucket bucket=com.simplecard.service.BoundedBuckets.get(buckets,clientIp,10000,
+                () -> new TokenBucket(rateLimit),old -> System.nanoTime()/1000000L-old.lastAccess>2000);
+        if (bucket==null || !bucket.tryConsume(rateLimit)) {
             rejectTooManyRequests(response, "请求过于频繁，请稍后再试");
             return;
         }
@@ -82,7 +84,7 @@ public class RateLimitFilter implements Filter {
         chain.doFilter(request, response);
 
         // Periodic cleanup
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime() / 1_000_000L;
         if (buckets.size() > 10000) {
             buckets.entrySet().removeIf(e -> now - e.getValue().lastAccess > 60_000);
         }
@@ -101,14 +103,14 @@ public class RateLimitFilter implements Filter {
     }
 
     private int getRateLimit() {
-        long now = System.currentTimeMillis();
+        long now = System.nanoTime() / 1_000_000L;
         if (now > cacheExpiry) {
             try {
                 cachedRateLimit = siteConfigRepository.findByConfigKey("rate_limit_per_second")
                         .map(c -> {
-                            try { return Integer.parseInt(c.getConfigValue()); }
-                            catch (Exception e) { return 20; }
-                        }).orElse(20);
+                            try { int value=Integer.parseInt(c.getConfigValue()); return value>0 && value<=1000 ? value : 25; }
+                            catch (Exception e) { return 25; }
+                        }).orElse(25);
             } catch (Exception e) {
                 // DB unavailable, use cached value
             }
@@ -135,8 +137,8 @@ public class RateLimitFilter implements Filter {
             this.defaultCapacity = capacity;
             this.refillIntervalMs = refillIntervalMs;
             this.tokens = capacity;
-            this.lastRefill = System.currentTimeMillis();
-            this.lastAccess = System.currentTimeMillis();
+            this.lastRefill = System.nanoTime() / 1_000_000L;
+            this.lastAccess = System.nanoTime() / 1_000_000L;
         }
 
         /** 使用创建时的容量（登录/注册桶：上限是编译期常量，不随配置变化） */
@@ -147,7 +149,7 @@ public class RateLimitFilter implements Filter {
         /** 使用调用方给出的当前容量，使后台配置变更立即对既有桶生效 */
         synchronized boolean tryConsume(int capacity) {
             refill(capacity);
-            lastAccess = System.currentTimeMillis();
+            lastAccess = System.nanoTime() / 1_000_000L;
             if (tokens > 0) {
                 tokens--;
                 return true;
@@ -156,7 +158,7 @@ public class RateLimitFilter implements Filter {
         }
 
         private void refill(int capacity) {
-            long now = System.currentTimeMillis();
+            long now = System.nanoTime() / 1_000_000L;
             long elapsed = now - lastRefill;
             if (elapsed >= refillIntervalMs) {
                 long intervals = elapsed / refillIntervalMs;

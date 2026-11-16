@@ -22,7 +22,7 @@ public class ProductGuardFilter extends OncePerRequestFilter {
     private final ClientIpResolver ip;
     private final ObjectMapper json;
     @Override protected boolean shouldNotFilter(HttpServletRequest r) {
-        String path = r.getRequestURI().substring(r.getContextPath().length());
+        String path = RequestPaths.application(r);
         return !protection.enabled() || !"GET".equals(r.getMethod()) || !path.startsWith("/products/");
     }
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
@@ -32,7 +32,7 @@ public class ProductGuardFilter extends OncePerRequestFilter {
             entered = protection.enterRequest();
             if (!entered) throw ProductQueryProtection.busy();
             protection.admit(ip.resolve(request));
-            String id = request.getRequestURI().substring(request.getContextPath().length() + "/products/".length());
+            String id = RequestPaths.application(request).substring("/products/".length());
             if (!id.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"))
                 throw new BusinessException(ErrorCode.BAD_REQUEST, "商品 ID 格式错误");
             chain.doFilter(request, response);

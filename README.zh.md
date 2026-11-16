@@ -270,3 +270,5 @@ pnpm dev:web
 后端默认启用 Redisson 订单/库存锁，需要运行 Redis 并配置随机 `REDIS_PASSWORD`。付款核验后先持久化事件，Redis 暂时不可用时由后台恢复处理。部署前执行 `apps/api/src/main/resources/db/redis-coordination.sql`。详细配置、故障策略和隔离测试见 [Redis 协调说明](docs/redis-coordination.md)。
 
 公开商品详情默认启用布隆过滤器、空值缓存、展示字段短缓存、请求合并及 Redisson 互斥重建，统一复用回源限流，使用独立的 `product-cache` Redis。价格、库存和可见性实时查库；规格统计已批量聚合。部署时设置随机 `PRODUCT_CACHE_REDIS_PASSWORD`，排空旧实例后统一升级；无需新增数据库迁移。见 [商品查询防护说明](docs/product-query-protection.md)。
+
+关键 API 另使用独立 `api-limiter` Redis，实现共享滑动窗口、键预算、shadow 与并发保护；商品详情原有限额保持不变，支付回调独立处理。新增 TXID/repay 归属校验、参数边界及卡密导出审计。部署需配置独立 `API_LIMIT_REDIS_PASSWORD` 和准确的受信代理 IP；访客敏感操作需要原浏览器会话。见 [接口安全与限流说明](docs/api-traffic-safety.md)。

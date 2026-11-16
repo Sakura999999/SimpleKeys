@@ -22,7 +22,7 @@ public class PaymentWebhookController {
      */
     @GetMapping(value = "/epay", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> handleEpayCallback(@RequestParam Map<String, String> params) {
-        log.info("Epay callback received: {}", params);
+        log.debug("Epay callback received");
         String result = webhookService.processEpayCallback(params);
         return ResponseEntity.ok(result);
     }
@@ -32,7 +32,7 @@ public class PaymentWebhookController {
      */
     @PostMapping(value = "/usdt", produces = MediaType.TEXT_PLAIN_VALUE)
     public ResponseEntity<String> handleBepusdtCallback(@RequestBody Map<String, Object> params) {
-        log.info("BEpusdt callback received: {}", params);
+        log.debug("BEpusdt callback received");
         String result = webhookService.processBepusdtCallback(params);
         return ResponseEntity.ok(result);
     }
