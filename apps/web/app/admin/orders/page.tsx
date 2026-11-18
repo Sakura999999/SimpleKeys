@@ -1,11 +1,11 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { Search, ChevronDown, Eye, Download, ChevronLeft, ChevronRight, X, CheckCircle } from "lucide-react"
 import { cn, stripInvisible } from "@/lib/utils"
 import { useLocale } from "@/lib/context"
 import { toast } from "sonner"
-import { adminPaymentInboxApi, type PendingPaymentEvent, adminOrderApi, adminCardKeyApi, withMockFallback } from "@/services/api"
+import { adminPaymentInboxApi, type PaymentInboxStatus, adminOrderApi, adminCardKeyApi, withMockFallback } from "@/services/api"
 import { mockAdminOrderList, mockOrderCardKeys } from "@/lib/mock-data"
 import { OrderStatusBadge } from "@/components/shared/order-status-badge"
 import { PaymentIcon, getPaymentLabel } from "@/components/shared/payment-icon"
@@ -39,7 +39,7 @@ export default function AdminOrdersPage() {
     }
   }
 
-  const [pendingPayments, setPendingPayments] = useState<PendingPaymentEvent[]>([])
+  const [paymentInbox, setPaymentInbox] = useState<PaymentInboxStatus | null>(null)
   const [paymentInboxError, setPaymentInboxError] = useState(false)
   const [retryingPayment, setRetryingPayment] = useState<string | null>(null)
   const [orders, setOrders] = useState<AdminOrderItem[]>([])
@@ -56,6 +56,37 @@ export default function AdminOrdersPage() {
   const [debouncedSearch, setDebouncedSearch] = useState("")
   const [markPaidConfirm, setMarkPaidConfirm] = useState<string | null>(null)
   const [refundBusy, setRefundBusy] = useState(false)
+
+  const fetchPaymentInbox = useCallback(async () => {
+    try {
+      setPaymentInbox(await adminPaymentInboxApi.pending())
+      setPaymentInboxError(false)
+    } catch {
+      setPaymentInboxError(true)
+    }
+  }, [])
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState === "visible") void fetchPaymentInbox()
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 60_000)
+    document.addEventListener("visibilitychange", refresh)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener("visibilitychange", refresh)
+    }
+  }, [fetchPaymentInbox])
+
+  const showPaymentOrder = (orderId: string) => {
+    setSearch(orderId)
+    setDebouncedSearch(orderId)
+    setStatusFilter("")
+    setPaymentFilter("")
+    setOrderTypeFilter("")
+    setCurrentPage(1)
+  }
 
   const handleRefund = async (order: AdminOrderItem) => {
     const processing = order.refund_request?.status === "PROCESSING"
@@ -76,8 +107,6 @@ export default function AdminOrdersPage() {
 
   const fetchOrders = async () => {
     setLoading(true)
-    try { const inbox = await adminPaymentInboxApi.pending(); setPendingPayments(inbox.list); setPaymentInboxError(false) }
-    catch { setPaymentInboxError(true) }
     try {
       const data = await withMockFallback(
         () => adminOrderApi.getList({
@@ -170,13 +199,27 @@ export default function AdminOrdersPage() {
       </div>
 
       <div className="text-sm text-muted-foreground">已付款待处理：可补货重试；退款须先申请占位，再进行外部退款，成功后登记凭证。结果未知时保留占位并人工核查。</div>
-      {paymentInboxError && <p className="text-sm text-amber-700">暂时无法读取待确认付款，请稍后刷新。</p>}
-      {pendingPayments.length > 0 && <section className="rounded-xl border border-amber-300 bg-amber-50/30 p-4">
-        <h2 className="font-semibold">已核验付款待处理（系统自动重试中）</h2>
+      {paymentInboxError && <p role="status" className="text-sm text-amber-700">暂时无法更新付款提醒，请稍后刷新。</p>}
+      {paymentInbox && paymentInbox.discrepancy_count > 0 && <section className="rounded-xl border border-red-300 bg-red-50/30 p-4">
+        <h2 role="status" className="font-semibold">支付账差待核对 · {paymentInbox.discrepancy_count} 笔</h2>
+        <p className="mt-1 text-sm text-muted-foreground">支付平台曾报已付款，商城尚未核验。请核对原单，避免重复收款或发卡。</p>
+        <ul className="mt-3 space-y-2">
+          {paymentInbox.discrepancies.map(attempt => <li key={attempt.order_id} className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t pt-2 text-sm">
+            <button type="button" className="break-all text-left underline" onClick={() => showPaymentOrder(attempt.order_id)}>{attempt.order_id}</button>
+            <span className="text-muted-foreground">{attempt.provider === "usdt" ? "USDT" : "易支付"} · {attempt.next_check_at ? "继续对账中" : "需人工核对"}</span>
+          </li>)}
+        </ul>
+        {paymentInbox.discrepancy_count > paymentInbox.discrepancies.length && <p className="mt-2 text-sm text-muted-foreground">此处显示最早的 {paymentInbox.discrepancies.length} 笔。</p>}
+      </section>}
+      {paymentInbox && paymentInbox.list.length > 0 && <section className="rounded-xl border border-amber-300 bg-amber-50/30 p-4">
+        <h2 role="status" className="font-semibold">
+          已核验付款待处理 · {paymentInbox.total} 笔
+          {paymentInbox.overdue_count > 0 && <span className="ml-3 text-amber-800 dark:text-amber-300">已等待 {paymentInbox.backlog_minutes} 分钟或以上 · {paymentInbox.overdue_count} 笔</span>}
+        </h2>
         <p className="mt-1 text-sm text-muted-foreground">无需让客户重复付款。若多次重试仍未完成，请检查 Redis 和后端错误记录。</p>
-        <div className="mt-3 flex flex-col gap-3">{pendingPayments.map(event => <div key={event.id} className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-sm">
-          <div><button className="underline" onClick={() => { setSearch(event.order_id); setStatusFilter("") }}>{event.order_id}</button><span className="ml-3">{event.channel_code} · 已重试 {event.retry_count} 次</span>{event.last_error && <p className="mt-1 text-muted-foreground">{event.last_error}</p>}</div>
-          <button disabled={retryingPayment !== null} className="rounded-lg border px-3 py-2 disabled:opacity-50" onClick={async () => { setRetryingPayment(event.id); try { const done=await adminPaymentInboxApi.retry(event.id); toast[done ? "success" : "info"](done ? "付款处理已完成" : "仍在等待处理，系统将继续重试"); await fetchOrders() } catch (e) { toast.error(e instanceof Error ? e.message : "重试失败") } finally { setRetryingPayment(null) } }}>{retryingPayment === event.id ? "处理中…" : "立即重试"}</button>
+        <div className="mt-3 flex flex-col gap-3">{paymentInbox.list.map(event => <div key={event.id} className="flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-sm">
+          <div><button type="button" className="break-all text-left underline" onClick={() => showPaymentOrder(event.order_id)}>{event.order_id}</button><span className="ml-3">{event.channel_code} · 已重试 {event.retry_count} 次</span>{event.last_error && <p className="mt-1 text-muted-foreground">{event.last_error}</p>}</div>
+          <button disabled={retryingPayment !== null} className="rounded-lg border px-3 py-2 disabled:opacity-50" onClick={async () => { setRetryingPayment(event.id); try { const done=await adminPaymentInboxApi.retry(event.id); toast[done ? "success" : "info"](done ? "付款处理已完成" : "仍在等待处理，系统将继续重试"); await Promise.all([fetchOrders(), fetchPaymentInbox()]) } catch (e) { toast.error(e instanceof Error ? e.message : "重试失败") } finally { setRetryingPayment(null) } }}>{retryingPayment === event.id ? "处理中…" : "立即重试"}</button>
         </div>)}</div>
       </section>}
       {/* Filters */}

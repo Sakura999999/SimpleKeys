@@ -56,7 +56,8 @@ class TrafficSafetyTest {
         order.setSessionToken("original");guard.assertSensitiveAccess(order,"original");
     }
     private Order pending() {
-        Order o=new Order();o.setId(UUID.randomUUID());o.setStatus(OrderStatus.PENDING);o.setPaymentMethod("usdt_trc20");o.setUsdtChain("usdt_trc20");return o;
+        Order o=new Order();o.setId(UUID.randomUUID());o.setStatus(OrderStatus.PENDING);o.setPaymentMethod("usdt_trc20");o.setUsdtChain("usdt_trc20");
+        o.setUsdtWalletAddress("test-wallet");o.setUsdtCryptoAmount("1");return o;
     }
     private OrderController controller(OrderRepository orders,UnmatchedTransactionRepository unmatched,TxidVerifyService verify,ApiTrafficLimiter limiter) {
         SiteConfigRepository configs=mock(SiteConfigRepository.class);when(configs.findByConfigKey(anyString())).thenReturn(Optional.empty());
@@ -114,10 +115,9 @@ class TrafficSafetyTest {
     @Test void provider429AndTimeoutNeverBecomeManualReviewRecords() {
         for(RuntimeException failure:List.of(org.springframework.web.client.HttpClientErrorException.create(HttpStatus.TOO_MANY_REQUESTS,"busy",HttpHeaders.EMPTY,new byte[0],null),
                 new org.springframework.web.client.ResourceAccessException("timeout"))) {
-            RestTemplate http=mock(RestTemplate.class);when(http.getForObject(anyString(),eq(String.class))).thenThrow(failure);
+            RestTemplate http=mock(RestTemplate.class);when(http.postForObject(anyString(),anyMap(),eq(String.class))).thenThrow(failure);
             var unmatched=mock(UnmatchedTransactionRepository.class);
-            var service=new com.simplecard.service.impl.TxidVerifyServiceImpl(mock(OrderRepository.class),mock(PaymentInboxService.class),
-                    mock(InventoryLifecycleService.class),unmatched,http,new ObjectMapper());
+            var service=new com.simplecard.service.impl.TxidVerifyServiceImpl(unmatched,http,new ObjectMapper());
             assertThatThrownBy(()->service.verifyAndProcess(pending(),"a".repeat(64)))
                     .isInstanceOfSatisfying(BusinessException.class,e->assertThat(e.getHttpStatus().value()).isIn(429,503));
             verifyNoInteractions(unmatched);

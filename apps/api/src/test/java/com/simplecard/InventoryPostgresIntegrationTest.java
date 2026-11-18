@@ -29,6 +29,10 @@ import static org.assertj.core.api.Assertions.*;
     "spring.sql.init.mode=never", "spring.mail.host=localhost", "mail.enabled=false"})
 class InventoryPostgresIntegrationTest {
     @Autowired InventoryLifecycleService inventory;
+    @Autowired PaymentInboxService paymentInbox;
+    @Autowired PaymentAttemptService paymentAttempts;
+    @Autowired PaymentAttemptRepository paymentAttemptRows;
+    @Autowired com.simplecard.controller.AdminPaymentInboxController adminInbox;
     @Autowired OrderService orderService;
     @Autowired DeliverService delivery;
     @Autowired AdminCardKeyService adminCards;
@@ -44,7 +48,7 @@ class InventoryPostgresIntegrationTest {
     @Autowired PlatformTransactionManager transactions;
     Product product;
     @BeforeEach void setup() {
-        jdbc.execute("TRUNCATE refund_requests,unmatched_transactions,verified_payment_events,card_keys,order_items,orders,products,payment_channels,users,points_logs,site_configs CASCADE");
+        jdbc.execute("TRUNCATE payment_attempts,refund_requests,unmatched_transactions,verified_payment_events,card_keys,order_items,orders,products,payment_channels,users,points_logs,site_configs CASCADE");
         product = product();
         PaymentChannel c = new PaymentChannel(); c.setChannelCode("alipay"); c.setChannelName("Alipay"); channels.save(c);
     }
@@ -84,6 +88,116 @@ class InventoryPostgresIntegrationTest {
         Callable<Boolean> buyB=() -> { try { orderService.createDirectOrder(b,null,null,"test-session"); return true; } catch (BusinessException e) { return false; } };
         assertThat(parallel(buyA,buyB)).containsExactlyInAnyOrder(true,false);
         assertThat(orders.count()).isEqualTo(1); assertThat(cards.findAll()).allMatch(k -> k.getStatus()==CardKeyStatus.LOCKED);
+    }
+
+    @Test void sameVerifiedUsdtTransferCannotSettleTwoOrders() throws Exception {
+        stock(product);
+        stock(product);
+        UUID first = pending(product, 1);
+        UUID second = pending(product, 1);
+        String hash = "a".repeat(64);
+        String key = "usdt_tx_usdt_trc20_" + hash;
+        java.util.function.Function<UUID, Boolean> settle = orderId -> {
+            try {
+                paymentInbox.accept(key, "usdt", orderId, hash);
+                return true;
+            } catch (BusinessException conflict) {
+                assertThat(conflict.getCode()).isEqualTo(com.simplecard.constant.ErrorCode.BAD_REQUEST);
+                return false;
+            }
+        };
+        assertThat(parallel(() -> settle.apply(first), () -> settle.apply(second)))
+                .containsExactlyInAnyOrder(true, false);
+        assertThat(orders.findAll()).extracting(Order::getStatus)
+                .containsExactlyInAnyOrder(OrderStatus.DELIVERED, OrderStatus.PENDING);
+        assertThat(jdbc.queryForObject("select count(*) from verified_payment_events where event_key=?", Integer.class, key))
+                .isEqualTo(1);
+    }
+
+    @Test void onlyOneProcessCanStartGatewayCreationForAnOrder() throws Exception {
+        UUID id = pending(product, 1);
+        PaymentChannel channel = channels.findByChannelCodeAndIsDeleted("alipay", 0).orElseThrow();
+        Callable<Boolean> start = () -> paymentAttempts.start(id, channel, "https://gateway.invalid", "merchant",
+                BigDecimal.TEN, "CNY");
+        assertThat(parallel(start, start)).containsExactlyInAnyOrder(true, false);
+        paymentAttempts.creationFailed(id, false);
+        assertThat(start.call()).isFalse();
+        var attempt = paymentAttempts.find(id).orElseThrow();
+        assertThat(attempt.getState()).isEqualTo(PaymentAttempt.State.UNKNOWN);
+        assertThat(attempt.getNextCheckAt()).isNotNull();
+    }
+
+    @Test void reconciliationLeaseCanBeRecoveredAndCannotBeCompletedByAnOldWorker() throws Exception {
+        UUID orderId = pending(product, 1);
+        PaymentChannel channel = channels.findByChannelCodeAndIsDeleted("alipay", 0).orElseThrow();
+        assertThat(paymentAttempts.start(orderId, channel, "https://gateway.invalid", "merchant", BigDecimal.TEN, "CNY")).isTrue();
+        UUID id = paymentAttempts.find(orderId).orElseThrow().getId();
+        LocalDateTime due = LocalDateTime.now().withNano(0).plusMinutes(3);
+        LocalDateTime firstLease = due.plusMinutes(5);
+        Callable<Integer> claim = () -> paymentAttemptRows.claim(id, due, firstLease);
+        assertThat(parallel(claim, claim)).containsExactlyInAnyOrder(0, 1);
+
+        LocalDateTime secondLease = firstLease.plusMinutes(5);
+        assertThat(paymentAttemptRows.claim(id, firstLease.plusSeconds(1), secondLease)).isEqualTo(1);
+        assertThat(paymentAttemptRows.completeCheck(id, firstLease, null, PaymentAttempt.State.VERIFIED, 0, "STALE"))
+                .isZero();
+        assertThat(paymentAttemptRows.completeCheck(id, secondLease, null, PaymentAttempt.State.VERIFIED, 0, "VERIFIED"))
+                .isEqualTo(1);
+        assertThat(paymentAttempts.find(orderId).orElseThrow().getState()).isEqualTo(PaymentAttempt.State.VERIFIED);
+    }
+
+    @Test void adminPaymentAlertsDistinguishStalledReceiptsFromUnverifiedPaidOrders() {
+        UUID flaggedOrder = pending(product, 1);
+        UUID queuedOrder = pending(product, 1);
+        PaymentChannel channel = channels.findByChannelCodeAndIsDeleted("alipay", 0).orElseThrow();
+        LocalDateTime now = LocalDateTime.now();
+        for (UUID id : List.of(flaggedOrder, queuedOrder)) {
+            paymentAttempts.start(id, channel, "https://gateway.invalid", "merchant", BigDecimal.TEN, "CNY");
+            jdbc.update("update payment_attempts set last_check_result = ? where order_id = ?", PaymentAttempt.PAID_UNVERIFIED, id);
+        }
+        jdbc.update("""
+                insert into verified_payment_events
+                (id, event_key, channel_code, order_id, processed, retry_count, next_attempt_at, created_at)
+                values (?, 'verified-test-event', 'epay', ?, false, 0, ?, ?)
+                """, UUID.randomUUID(), queuedOrder, now.plusHours(1), now.minusMinutes(6));
+
+        var data = (Map<?, ?>) adminInbox.pending(1).getData();
+        assertThat(data.get("overdue_count")).isEqualTo(1L);
+        assertThat(data.get("discrepancy_count")).isEqualTo(1L);
+        assertThat(attemptRowsWithPaidDiscrepancies()).containsExactly(flaggedOrder);
+
+        jdbc.update("update orders set paid_at = ? where id = ?", now, flaggedOrder);
+        assertThat(attemptRowsWithPaidDiscrepancies()).isEmpty();
+    }
+
+    private List<UUID> attemptRowsWithPaidDiscrepancies() {
+        return paymentAttemptRows.findUnresolvedPaidChecks(PaymentAttempt.PAID_UNVERIFIED,
+                org.springframework.data.domain.PageRequest.of(0, 10)).stream()
+                .map(PaymentAttempt::getOrderId).toList();
+    }
+
+    @Test void lateVerifiedPaymentIsRecordedWithoutAutomaticFulfillment() {
+        CardKey key = stock(product);
+        UUID id = pending(product, 1);
+        String hash = "b".repeat(64);
+        paymentInbox.accept("usdt_tx_usdt_trc20_" + hash, "usdt", id, hash, "late payment");
+        assertThat(orders.findById(id).orElseThrow().getStatus()).isEqualTo(OrderStatus.PAID_REVIEW);
+        assertThat(orders.findById(id).orElseThrow().getUsdtTxId()).isEqualTo(hash);
+        assertThat(cards.findById(key.getId()).orElseThrow().getStatus()).isEqualTo(CardKeyStatus.AVAILABLE);
+    }
+
+    @Test void secondVerifiedTransferRemainsVisibleForReviewWithoutIssuingAnotherCard() {
+        stock(product);
+        stock(product);
+        UUID id = pending(product, 1);
+        String first = "a".repeat(64);
+        String second = "b".repeat(64);
+        paymentInbox.accept("usdt_tx_usdt_trc20_" + first, "usdt", id, first);
+        paymentInbox.accept("usdt_tx_usdt_trc20_" + second, "usdt", id, second);
+        assertThat(orders.findById(id).orElseThrow().getUsdtTxId()).isEqualTo(first);
+        assertThat(cards.findByOrderId(id)).hasSize(1);
+        assertThat(jdbc.queryForObject("select review_reason from verified_payment_events where tx_id=?",
+                String.class, second)).isNotBlank();
     }
     @Test void concurrentIdempotencyKeyReservesOnce() throws Exception {
         stock(product); var a=request("same-request");

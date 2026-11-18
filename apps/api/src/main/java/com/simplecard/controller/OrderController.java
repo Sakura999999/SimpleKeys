@@ -162,7 +162,7 @@ public class OrderController {
         if (txid == null || txid.isBlank()) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "请提供交易哈希（TXID）");
         }
-        txid = txid.trim();
+        txid = txid.trim().toLowerCase(java.util.Locale.ROOT);
 
         // 1. 校验订单存在
         Order order = orderRepository.findById(id)
@@ -177,6 +177,9 @@ public class OrderController {
         // 3. 校验订单支付方式为 USDT
         if (order.getPaymentMethod() == null || !order.getPaymentMethod().startsWith("usdt_")) {
             throw new BusinessException(ErrorCode.ORDER_NOT_USDT, "该订单非 USDT 支付方式");
+        }
+        if (order.getUsdtWalletAddress() == null || order.getUsdtCryptoAmount() == null || order.getUsdtChain() == null) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "该订单尚无可核对的 USDT 支付信息");
         }
 
         // 4. 校验 TXID 格式

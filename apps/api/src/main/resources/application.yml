@@ -151,11 +151,12 @@ turnstile:
   site-key: ${TURNSTILE_SITE_KEY:}
 
 # Logging
-# 默认 INFO：DEBUG 会把请求体、SQL 参数、回调载荷整批写进日志，既涨量又扩大泄露面
-# （日志常被收集到第三方平台）。排障时用 LOG_LEVEL_APP=DEBUG 临时打开，不必改镜像。
+# RestTemplate 会在 DEBUG 打印完整查单 URL。通用易支付协议的 URL 可能包含商户密钥。
 logging:
   level:
     com.simplecard: ${LOG_LEVEL_APP:INFO}
+    org.springframework.web.client.RestTemplate: WARN
+    org.springframework.http.converter: WARN
     org.springframework.security: WARN
 
 coordination:

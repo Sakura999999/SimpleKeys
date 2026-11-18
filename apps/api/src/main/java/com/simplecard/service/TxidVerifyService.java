@@ -36,5 +36,9 @@ public interface TxidVerifyService {
                                         String expectedWalletAddress, String expectedCryptoAmount,
                                         LocalDateTime orderCreatedAt);
 
-    record ChainVerifyResult(boolean verified, String reason) {}
+    record ChainVerifyResult(boolean verified, String reason, LocalDateTime occurredAt) {
+        public ChainVerifyResult(boolean verified, String reason) {
+            this(verified, reason, null);
+        }
+    }
 }

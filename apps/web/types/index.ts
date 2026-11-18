@@ -214,6 +214,21 @@ export interface PaymentCreateResult {
   chain?: string
 }
 
+export interface PaymentStatusResult {
+  order_id: string
+  status: OrderStatus
+  expires_at: string
+  remaining_seconds: number
+  payment_processing?: boolean
+  payment_setup_pending?: boolean
+  payment_url?: string
+  qrcode_url?: string
+  pay_url?: string
+  wallet_address?: string
+  crypto_amount?: string
+  chain?: string
+}
+
 export interface TxidVerifyResult {
   result: "AUTO_APPROVED" | "AUTO_REJECTED" | "PENDING_REVIEW"
   reason: string

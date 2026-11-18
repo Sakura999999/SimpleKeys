@@ -34,6 +34,6 @@ public class PaymentWebhookController {
     public ResponseEntity<String> handleBepusdtCallback(@RequestBody Map<String, Object> params) {
         log.debug("BEpusdt callback received");
         String result = webhookService.processBepusdtCallback(params);
-        return ResponseEntity.ok(result);
+        return "ok".equals(result) ? ResponseEntity.ok(result) : ResponseEntity.status(503).body(result);
     }
 }

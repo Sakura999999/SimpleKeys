@@ -54,82 +54,109 @@ public class BepusdtServiceImpl implements BepusdtService {
         if (!url.endsWith("/")) url += "/";
         url += "api/v1/order/create-transaction";
 
-        log.info("BEpusdt createPayment: orderId={}, amount={}, tradeType={}, apiUrl={}",
-                orderId, amount, config.tradeType(), config.apiUrl());
+        log.info("BEpusdt createPayment: order={}, amount={}, tradeType={}", orderId, amount, config.tradeType());
 
-        // 带重试的网络调用（最多重试 2 次，间隔 1 秒）
-        int maxRetries = 2;
-        Exception lastException = null;
+        // Without a gateway idempotency guarantee, a failed transport leaves an unknown outcome.
+        try {
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<String> request = new HttpEntity<>(objectMapper.writeValueAsString(requestBody), headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
+            String responseBody = response.getBody();
 
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                if (attempt > 0) {
-                    log.info("BEpusdt API retry attempt {}/{}", attempt, maxRetries);
-                    Thread.sleep(1000);
-                }
-
-                HttpHeaders headers = new HttpHeaders();
-                headers.setContentType(MediaType.APPLICATION_JSON);
-                String body = objectMapper.writeValueAsString(requestBody);
-                HttpEntity<String> request = new HttpEntity<>(body, headers);
-
-                ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
-                String responseBody = response.getBody();
-
-                if (responseBody == null || responseBody.isBlank()) {
-                    log.error("BEpusdt API returned null/empty body");
-                    throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：响应为空");
-                }
-
-                log.debug("BEpusdt API raw response: {}", responseBody);
-
-                Map<String, Object> result;
-                try {
-                    result = objectMapper.readValue(responseBody, new TypeReference<>() {});
-                } catch (Exception parseEx) {
-                    log.error("BEpusdt API response is not valid JSON: {}", responseBody);
-                    throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：响应格式异常");
-                }
-
-                // BEpusdt 返回 status_code: 200 表示成功
-                Object statusCode = result.get("status_code");
-                int code = statusCode instanceof Number n ? n.intValue() : -1;
-                String msg = result.get("message") != null ? result.get("message").toString() : "";
-
-                if (code != 200) {
-                    log.error("BEpusdt API error: status_code={}, message={}", code, msg);
-                    throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：" + msg);
-                }
-
-                // 解析 data 字段
-                @SuppressWarnings("unchecked")
-                Map<String, Object> data = (Map<String, Object>) result.get("data");
-                if (data == null) {
-                    throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：响应缺少 data");
-                }
-
-                String tradeId = getString(data, "trade_id");
-                String walletAddress = getString(data, "token");
-                String cryptoAmount = getString(data, "actual_amount");
-                String paymentUrl = getString(data, "payment_url");
-                int expirationTime = data.get("expiration_time") instanceof Number n
-                        ? n.intValue() : config.timeout();
-
-                log.info("BEpusdt payment created: tradeId={}, wallet={}, amount={}, paymentUrl={}",
-                        tradeId, walletAddress, cryptoAmount, paymentUrl);
-
-                return new BepusdtPaymentResult(tradeId, walletAddress, cryptoAmount, paymentUrl, expirationTime);
-
-            } catch (BusinessException e) {
-                throw e; // 业务异常直接抛出，不重试
-            } catch (Exception e) {
-                lastException = e;
-                log.warn("BEpusdt API attempt {} failed: {}", attempt + 1, e.getMessage());
+            if (responseBody == null || responseBody.isBlank()) {
+                log.error("BEpusdt API returned null/empty body");
+                throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：响应为空");
             }
-        }
 
-        log.error("BEpusdt API call failed after {} retries", maxRetries + 1, lastException);
-        throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：网络超时，请重试");
+            Map<String, Object> result;
+            try {
+                result = objectMapper.readValue(responseBody, new TypeReference<>() {});
+            } catch (Exception parseEx) {
+                log.warn("BEpusdt create response was not valid JSON: order={}", orderId);
+                throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：响应格式异常");
+            }
+
+            // BEpusdt 返回 status_code: 200 表示成功
+            Object statusCode = result.get("status_code");
+            int code = statusCode instanceof Number n ? n.intValue() : -1;
+            if (code != 200) {
+                log.warn("BEpusdt create rejected: order={}, code={}", orderId, code);
+                throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付平台拒绝了建单请求");
+            }
+
+            // 解析 data 字段
+            @SuppressWarnings("unchecked")
+            Map<String, Object> data = (Map<String, Object>) result.get("data");
+            if (data == null) {
+                throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：响应缺少 data");
+            }
+
+            String tradeId = getString(data, "trade_id");
+            String walletAddress = getString(data, "token");
+            String cryptoAmount = getString(data, "actual_amount");
+            String paymentUrl = getString(data, "payment_url");
+            String returnedOrderId = getString(data, "order_id");
+            String returnedTradeType = getString(data, "trade_type");
+            if (!orderId.equals(returnedOrderId) || tradeId == null || tradeId.isBlank()
+                    || walletAddress == null || walletAddress.isBlank()
+                    || paymentUrl == null || paymentUrl.isBlank()
+                    || (!returnedTradeType.isBlank() && !config.tradeType().equals(returnedTradeType))
+                    || !isPositiveAmount(cryptoAmount)) {
+                throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "USDT 支付创建失败：网关响应不完整或与请求不匹配");
+            }
+            int expirationTime = data.get("expiration_time") instanceof Number n
+                    ? n.intValue() : config.timeout();
+
+            log.info("BEpusdt payment created: order={}", orderId);
+
+            return new BepusdtPaymentResult(tradeId, walletAddress, cryptoAmount, paymentUrl, expirationTime);
+
+        } catch (BusinessException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            log.warn("BEpusdt create outcome unknown: order={}, error={}", orderId, exception.getClass().getSimpleName());
+            throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "支付创建结果待核实，请查询原订单");
+        }
+    }
+
+    @Override
+    public OrderQueryResult queryOrder(BepusdtConfig config, String tradeId) {
+        try {
+            String url = config.apiUrl().replaceAll("/+$", "") + "/api/v1/pay/info";
+            String response = restTemplate.postForObject(url, Map.of("trade_id", tradeId), String.class);
+            if (response == null) return null;
+            var root = objectMapper.readTree(response);
+            var data = root.path("data");
+            if (root.path("status_code").asInt() != 200 || !data.isObject()) return null;
+            String txid = data.path("block_transaction_id").asText("");
+            if (txid.isBlank()) {
+                // The checkout API returns an explorer URL. Extract the ID locally and never fetch that URL.
+                String explorer = "usdt.bep20".equals(config.tradeType())
+                        ? "https://bscscan[.]com/tx/(?:0[xX])?" : "https://tronscan[.]org/#/transaction/";
+                var matcher = java.util.regex.Pattern.compile(explorer + "([a-fA-F0-9]{64})")
+                        .matcher(data.path("trade_url").asText(""));
+                if (matcher.matches()) {
+                    txid = ("usdt.bep20".equals(config.tradeType()) ? "0x" : "") + matcher.group(1);
+                }
+            }
+            return new OrderQueryResult(data.path("status").asText(), data.path("order_id").asText(),
+                    data.path("trade_id").asText(), data.path("trade_type").asText(),
+                    data.path("token").asText(), data.path("actual_amount").asText(),
+                    data.path("money").asText(), data.path("fiat").asText(), txid);
+        } catch (Exception exception) {
+            log.warn("BEpusdt order lookup unavailable: error={}", exception.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private boolean isPositiveAmount(String value) {
+        if (value == null) return false;
+        try {
+            return new BigDecimal(value).signum() > 0;
+        } catch (NumberFormatException invalid) {
+            return false;
+        }
     }
 
     /**

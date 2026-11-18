@@ -11,6 +11,7 @@ public class VerifiedPaymentEvent extends BaseEntity {
     @Column(nullable=false) private String channelCode;
     @Column(nullable=false) private UUID orderId;
     private String txId;
+    private String reviewReason;
     @Column(nullable=false) private boolean processed;
     @Column(nullable=false) private int retryCount;
     @Column(nullable=false) private LocalDateTime nextAttemptAt;

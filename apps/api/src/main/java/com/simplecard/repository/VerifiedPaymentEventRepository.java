@@ -14,4 +14,6 @@ public interface VerifiedPaymentEventRepository extends JpaRepository<VerifiedPa
     Optional<VerifiedPaymentEvent> lockEvent(@Param("id") UUID id);
     List<VerifiedPaymentEvent> findByProcessedFalseAndNextAttemptAtLessThanEqualOrderByNextAttemptAtAsc(LocalDateTime now, Pageable page);
     Page<VerifiedPaymentEvent> findByProcessedFalseOrderByCreatedAtAsc(Pageable page);
+    long countByProcessedFalseAndCreatedAtLessThanEqual(LocalDateTime cutoff);
+    Page<VerifiedPaymentEvent> findByReviewReasonIsNotNullOrderByCreatedAtDesc(Pageable page);
 }

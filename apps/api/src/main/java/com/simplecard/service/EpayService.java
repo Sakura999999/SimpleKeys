@@ -44,5 +44,9 @@ public interface EpayService {
 
     record EpayResult(int code, String msg, String tradeNo, String payUrl, String qrcodeUrl) {}
 
-    record OrderQueryResult(String tradeStatus, String money, String tradeNo) {}
+    record OrderQueryResult(String tradeStatus, String money, String tradeNo, boolean merchantVerified) {
+        public OrderQueryResult(String tradeStatus, String money, String tradeNo) {
+            this(tradeStatus, money, tradeNo, false);
+        }
+    }
 }

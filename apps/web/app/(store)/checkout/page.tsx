@@ -25,6 +25,7 @@ export default function CheckoutPage() {
   const [submitting, setSubmitting] = useState(false)
   const settlement = useSettlementQuote({ from_cart: true, payment_method: selectedPayment }, items.length > 0 && !!selectedPayment, JSON.stringify(items))
   const emailInputRef = useRef<HTMLInputElement>(null)
+  const orderRequest = useRef<{ identity: string; key: string } | null>(null)
   const { turnstileToken, setTurnstileToken, handleTurnstileReset } = useTurnstile()
 
   // Fetch payment channels on mount
@@ -69,14 +70,19 @@ export default function CheckoutPage() {
     try {
       setTurnstileHeaders(turnstileToken)
       const device = detectPaymentDevice()
+      const identity = JSON.stringify([settlement.quote.quote_token, email.trim(), selectedPayment])
+      if (orderRequest.current?.identity !== identity) {
+        orderRequest.current = { identity, key: generateIdempotencyKey() }
+      }
       const result = await orderApi.createFromCart({
           quote_token: settlement.quote.quote_token,
           email,
           payment_method: selectedPayment,
-          idempotency_key: generateIdempotencyKey(),
+          idempotency_key: orderRequest.current.key,
           device,
         })
       await refreshCart()
+      orderRequest.current = null
       toast.success(t("checkout.processingOrder"))
       const payUrlH5 = result.payment.pay_url || ""
       const qr = result.payment.qrcode_url || result.payment.payment_url || ""

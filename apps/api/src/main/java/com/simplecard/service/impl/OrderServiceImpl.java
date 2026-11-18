@@ -37,9 +37,7 @@ public class OrderServiceImpl implements OrderService {
     private final SiteConfigRepository siteConfigRepository;
     private final PaymentChannelRepository paymentChannelRepository;
     private final SettlementService settlementService;
-    private final PaymentServiceImpl paymentService;
-    private final com.simplecard.service.EpayService epayService;
-    private final com.simplecard.service.PaymentInboxService paymentInbox;
+    private final PaymentReconciliationService reconciliation;
 
     @Override
     @Transactional(readOnly = true)
@@ -349,6 +347,9 @@ public class OrderServiceImpl implements OrderService {
         result.put("order_id", order.getId());
         result.put("status", order.getStatus().name());
         result.put("payment_processing", paymentEvents.existsByOrderIdAndProcessedFalse(orderId));
+        if (order.getPaidAt() == null && order.getPaymentUrl() == null && order.getQrcodeUrl() == null) {
+            result.put("payment_setup_pending", reconciliation.isSetupPending(orderId));
+        }
         result.put("payment_review_reason", order.getPaymentReviewReason());
         result.put("expires_at", order.getExpiresAt());
         // 返回服务端计算的剩余秒数，前端倒计时以此为准，不受客户端时钟影响
@@ -363,6 +364,13 @@ public class OrderServiceImpl implements OrderService {
             String effectiveUrl = order.getQrcodeUrl() != null ? order.getQrcodeUrl() : order.getPaymentUrl();
             if (effectiveUrl != null) {
                 result.put("payment_url", effectiveUrl);
+                result.put("pay_url", order.getPaymentUrl());
+                result.put("qrcode_url", order.getQrcodeUrl());
+            }
+            if (order.getUsdtWalletAddress() != null) {
+                result.put("wallet_address", order.getUsdtWalletAddress());
+                result.put("crypto_amount", order.getUsdtCryptoAmount());
+                result.put("chain", order.getUsdtChain());
             }
         }
         return result;
@@ -372,28 +380,7 @@ public class OrderServiceImpl implements OrderService {
     public Map<String, Object> refreshOrderStatus(UUID orderId) {
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND,"订单不存在"));
-        if (order.getPaidAt() != null || order.getStatus() == OrderStatus.REFUNDED
-                || paymentEvents.existsByOrderIdAndProcessedFalse(orderId)) return getOrderStatus(orderId);
-        PaymentChannel channel = paymentChannelRepository.findByChannelCodeAndIsDeleted(order.getPaymentMethod(),0)
-                .orElseThrow(() -> new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE,"支付渠道不存在"));
-        if (!"epay".equals(channel.getProviderType())) return getOrderStatus(orderId);
-        var query = epayService.queryOrder(paymentService.buildChannelConfig(channel),orderId.toString());
-        if (query == null) throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE,
-                "支付平台暂时无法核实这笔订单，请在平台后台核对，勿重复付款");
-        if ("1".equals(query.tradeStatus()) || "TRADE_SUCCESS".equals(query.tradeStatus())) {
-            if (query.money() == null || query.tradeNo() == null || query.tradeNo().isBlank()
-                    || order.getEpayTradeNo() == null || !order.getEpayTradeNo().equals(query.tradeNo()))
-                throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL,"支付平台交易信息不完整或不匹配，请联系客服核对");
-            try {
-                if (order.getActualAmount().compareTo(new BigDecimal(query.money())) != 0)
-                    throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL,"支付金额不匹配，请联系客服核对");
-            } catch (NumberFormatException e) {
-                throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL,"支付金额格式异常，请联系客服核对");
-            }
-            paymentInbox.accept("epay_"+query.tradeNo(),"epay",orderId,null);
-        } else if (!"0".equals(query.tradeStatus()) && !"WAIT_BUYER_PAY".equals(query.tradeStatus())) {
-            throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE,"支付平台返回了无法识别的订单状态，请联系客服核对");
-        }
+        reconciliation.refresh(order);
         return getOrderStatus(orderId);
     }
 

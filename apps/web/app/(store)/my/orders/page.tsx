@@ -14,12 +14,14 @@ import type { OrderBrief, OrderStatus } from "@/types"
 import type { TranslationKey } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
-const STATUS_FILTERS: (OrderStatus | "ALL")[] = ["ALL", "PENDING", "PAID", "DELIVERED", "EXPIRED", "CANCELLED", "PAID_REVIEW", "REFUNDED"]
+const STATUS_FILTERS = ["ALL", "PENDING", "DELIVERED", "EXPIRED", "CANCELLED", "PAID_REVIEW", "REFUNDED"] as const satisfies readonly (OrderStatus | "ALL")[]
+
+type StatusFilter = (typeof STATUS_FILTERS)[number]
 
 export default function MyOrdersPage() {
   const { t } = useLocale()
   const user = useRequireAuth()
-  const [statusFilter, setStatusFilter] = useState<OrderStatus | "ALL">("ALL")
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL")
   const [orders, setOrders] = useState<OrderBrief[]>([])
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
@@ -70,9 +72,8 @@ export default function MyOrdersPage() {
     return () => { cancelled = true }
   }, [user, statusFilter, page, revision])
 
-  const statusKeys: Record<OrderStatus, TranslationKey> = {
+  const statusKeys: Record<Exclude<StatusFilter, "ALL">, TranslationKey> = {
     PENDING: "status.PENDING",
-    PAID: "status.PAID",
     DELIVERED: "status.DELIVERED",
     EXPIRED: "status.EXPIRED",
     CANCELLED: "status.CANCELLED",
@@ -80,7 +81,7 @@ export default function MyOrdersPage() {
     REFUNDED: "status.REFUNDED",
   }
 
-  const getFilterLabel = (s: OrderStatus | "ALL") => {
+  const getFilterLabel = (s: StatusFilter) => {
     if (s === "ALL") return t("myOrders.all")
     return t(statusKeys[s])
   }

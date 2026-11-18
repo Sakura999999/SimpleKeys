@@ -26,6 +26,7 @@ class SettlementIntegrationTest {
     @Autowired CurrencyRepository currencies;
     @Autowired ProductRepository products;
     @Autowired OrderRepository orderRepository;
+    @Autowired PaymentAttemptService paymentAttempts;
     @Autowired OrderItemRepository orderItems;
     @Autowired CartItemRepository carts;
     @Autowired PaymentChannelRepository channels;
@@ -135,7 +136,12 @@ class SettlementIntegrationTest {
     @Test void ambiguousGatewayFailureKeepsReservationLifetime() {
         var created = orders.createDirectOrder(confirmed(request(product("USD","10"),"alipay")),null,null,"test-session");
         when(epay.createPayment(any(),any(),any(),any(),any(),any(),any())).thenThrow(new BusinessException(400,"network timeout"));
-        assertThatThrownBy(() -> payments.createPayment(created.orderId(),"alipay",created.actualAmount())).isInstanceOf(BusinessException.class);
+        assertThat(payments.createPayment(created.orderId(),"alipay",created.actualAmount()))
+                .containsEntry("payment_setup_pending", true).containsEntry("order_id", created.orderId());
+        assertThat(payments.createPayment(created.orderId(),"alipay",created.actualAmount()))
+                .containsEntry("payment_setup_pending", true);
+        verify(epay, times(1)).createPayment(any(),any(),any(),any(),any(),any(),any());
+        assertThat(paymentAttempts.find(created.orderId()).orElseThrow().getState()).isEqualTo(PaymentAttempt.State.UNKNOWN);
         assertThat(orderRepository.findById(created.orderId()).orElseThrow().getStatus()).isEqualTo(com.simplecard.constant.OrderStatus.PENDING);
     }
 }

@@ -149,6 +149,12 @@ public class DeliverServiceImpl implements DeliverService {
     }
 
     @Override
+    @Transactional
+    public List<?> deliverOrders(Map<String, Object> request, String callerSessionToken) {
+        return deliverOrders(request, callerSessionToken, null);
+    }
+
+    @Override
     @SuppressWarnings("unchecked")
     @Transactional
     public List<?> deliverOrders(Map<String, Object> request, String callerSessionToken, String lookupToken) {

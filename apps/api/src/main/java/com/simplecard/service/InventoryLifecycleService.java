@@ -19,6 +19,7 @@ public class InventoryLifecycleService {
     private final OrderRepository orderRepository;
     private final RefundRequestRepository refunds;
     private final VerifiedPaymentEventRepository paymentEvents;
+    private final PaymentAttemptRepository paymentAttempts;
     private final OrderItemRepository orderItemRepository;
     private final CardKeyRepository cardKeyRepository;
     private final UserRepository userRepository;
@@ -75,6 +76,11 @@ public class InventoryLifecycleService {
 
     @Transactional(timeout = 15)
     public Order confirmPayment(UUID id, String txid) {
+        return confirmPayment(id, txid, null);
+    }
+
+    @Transactional(timeout = 15)
+    public Order confirmPayment(UUID id, String txid, String reviewReason) {
         Order order = locked(id);
         // A verified payment receipt may complete while a manual refund is in progress.
         // Preserve the receipt, but never allocate or deliver after the refund hold.
@@ -89,6 +95,11 @@ public class InventoryLifecycleService {
         if (order.getStatus() == OrderStatus.CANCELLED) {
             order.setStatus(OrderStatus.PAID_REVIEW);
             order.setPaymentReviewReason("订单取消后收到付款，请人工核对并安排发货或退款");
+            return orderRepository.saveAndFlush(order);
+        }
+        if (reviewReason != null) {
+            order.setStatus(OrderStatus.PAID_REVIEW);
+            order.setPaymentReviewReason(reviewReason);
             return orderRepository.saveAndFlush(order);
         }
         if (!allocate(order)) {
@@ -214,12 +225,27 @@ public class InventoryLifecycleService {
 
     @Transactional(timeout = 15)
     public void storePaymentDetails(Order snapshot) {
+        storePaymentDetails(snapshot, null, null);
+    }
+
+    @Transactional(timeout = 15)
+    public void storePaymentDetails(Order snapshot, String tradeId, LocalDateTime gatewayExpiry) {
         Order o = locked(snapshot.getId());
+        if (tradeId != null) {
+            PaymentAttempt attempt = paymentAttempts.findByOrderId(o.getId()).orElseThrow();
+            if (attempt.getState() == PaymentAttempt.State.VERIFIED) return;
+            attempt.setGatewayTradeId(tradeId);
+            attempt.setState(PaymentAttempt.State.READY);
+            if (gatewayExpiry != null && gatewayExpiry.isBefore(attempt.getExpiresAt())) attempt.setExpiresAt(gatewayExpiry);
+            attempt.setNextCheckAt(LocalDateTime.now().plusSeconds(30));
+        }
         // Only update gateway fields; never merge a detached order status over a callback.
         o.setPaymentUrl(snapshot.getPaymentUrl()); o.setQrcodeUrl(snapshot.getQrcodeUrl());
         o.setEpayTradeNo(snapshot.getEpayTradeNo()); o.setUsdtWalletAddress(snapshot.getUsdtWalletAddress());
         o.setUsdtCryptoAmount(snapshot.getUsdtCryptoAmount()); o.setUsdtTradeId(snapshot.getUsdtTradeId());
-        o.setUsdtChain(snapshot.getUsdtChain()); orderRepository.save(o);
+        o.setUsdtChain(snapshot.getUsdtChain());
+        if (gatewayExpiry != null && gatewayExpiry.isBefore(o.getExpiresAt())) o.setExpiresAt(gatewayExpiry);
+        orderRepository.save(o);
     }
 
     @Transactional(timeout = 15)

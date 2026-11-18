@@ -26,6 +26,7 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
   const { addItem } = useCart()
   const router = useRouter()
   const emailInputRef = useRef<HTMLInputElement>(null)
+  const orderRequest = useRef<{ identity: string; key: string } | null>(null)
 
   const enabledChannels = useMemo(() => channels.filter(c => c.is_enabled), [channels])
 
@@ -84,6 +85,10 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
     try {
       setTurnstileHeaders(turnstileToken)
       const device = detectPaymentDevice()
+      const identity = JSON.stringify([settlement.quote.quote_token, email.trim(), selectedPayment])
+      if (orderRequest.current?.identity !== identity) {
+        orderRequest.current = { identity, key: generateIdempotencyKey() }
+      }
       const result = await orderApi.create({
           quote_token: settlement.quote.quote_token,
           product_id: product.id,
@@ -91,9 +96,10 @@ export function ProductActions({ product: sourceProduct, channels }: ProductActi
           quantity,
           email,
           payment_method: selectedPayment,
-          idempotency_key: generateIdempotencyKey(),
+          idempotency_key: orderRequest.current.key,
           device,
         })
+      orderRequest.current = null
       toast.success(t("checkout.processingOrder"))
       const payUrlH5 = result.payment.pay_url || ""
       const qr = result.payment.qrcode_url || result.payment.payment_url || ""

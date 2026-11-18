@@ -18,6 +18,7 @@ import com.simplecard.service.EpayService.ChannelConfig;
 import com.simplecard.service.EpayService.EpayResult;
 import com.simplecard.service.OrderAccessGuard;
 import com.simplecard.service.PaymentService;
+import com.simplecard.service.PaymentAttemptService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -48,6 +49,11 @@ public class PaymentServiceImpl implements PaymentService {
     private final ObjectMapper objectMapper;
     private final OrderAccessGuard orderAccessGuard;
     private final com.simplecard.service.ApiTrafficLimiter trafficLimiter;
+    private final PaymentAttemptService paymentAttempts;
+
+    String epayType(String paymentMethod) {
+        return paymentMethod == null ? null : EPAY_TYPE_MAP.get(paymentMethod.toLowerCase(java.util.Locale.ROOT));
+    }
 
     @Override
     public Map<String, Object> createPayment(UUID orderId, String paymentMethod, BigDecimal amount) {
@@ -108,15 +114,23 @@ public class PaymentServiceImpl implements PaymentService {
         }
         String productName = buildProductName(order.getId());
 
-        BepusdtPaymentResult result = bepusdtService.createPayment(
-                config, order.getId().toString(), amount, productName);
+        if (!paymentAttempts.start(order.getId(), channel, config.apiUrl(), null, amount, config.fiat())) return;
+        var gatewayRequestAt = java.time.LocalDateTime.now();
+        BepusdtPaymentResult result;
+        try {
+            result = bepusdtService.createPayment(config, order.getId().toString(), amount, productName);
+        } catch (RuntimeException failure) {
+            recordCreateFailure(order.getId(), failure);
+            return;
+        }
 
         order.setPaymentUrl(result.paymentUrl());
         order.setUsdtWalletAddress(result.walletAddress());
         order.setUsdtCryptoAmount(result.cryptoAmount());
         order.setUsdtTradeId(result.tradeId());
         order.setUsdtChain(channel.getChannelCode());
-        inventoryLifecycle.storePaymentDetails(order);
+        inventoryLifecycle.storePaymentDetails(order, result.tradeId(),
+                gatewayRequestAt.plusSeconds(result.expirationTime()));
     }
 
     /**
@@ -128,8 +142,15 @@ public class PaymentServiceImpl implements PaymentService {
         String apiUrl = requireConfig(cfg, "api_url", channel.getChannelCode());
         String apiToken = requireConfig(cfg, "api_token", channel.getChannelCode());
         String notifyUrl = requireConfig(cfg, "notify_url", channel.getChannelCode());
+        requireHttpUrl(apiUrl, "api_url", false);
+        requireHttpUrl(notifyUrl, "notify_url", true);
         String redirectUrl = cfg.getOrDefault("redirect_url", "");
-        String tradeType = cfg.getOrDefault("trade_type", "usdt.trc20");
+        String tradeType = switch (channel.getChannelCode()) {
+            case "usdt_trc20" -> "usdt.trc20";
+            case "usdt_bep20" -> "usdt.bep20";
+            default -> throw new com.simplecard.exception.PaymentRejectedException(
+                    ErrorCode.CHANNEL_UNAVAILABLE, "不支持的 USDT 渠道");
+        };
         String fiat = cfg.getOrDefault("fiat", "CNY");
         int timeout = Integer.parseInt(cfg.getOrDefault("timeout", "900"));
         String fixedRate = cfg.getOrDefault("fixed_rate", "");
@@ -138,11 +159,26 @@ public class PaymentServiceImpl implements PaymentService {
                 tradeType, fiat, timeout, fixedRate);
     }
 
+    private void requireHttpUrl(String value, String field, boolean allowQuery) {
+        try {
+            var uri = java.net.URI.create(value);
+            if (uri.getHost() != null && uri.getUserInfo() == null && uri.getFragment() == null
+                    && (allowQuery || uri.getQuery() == null)
+                    && ("https".equalsIgnoreCase(uri.getScheme()) || "http".equalsIgnoreCase(uri.getScheme()))) {
+                return;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // Report the field name without including its value.
+        }
+        throw new com.simplecard.exception.PaymentRejectedException(
+                ErrorCode.CHANNEL_UNAVAILABLE, "支付渠道 " + field + " 必须为完整的 HTTP(S) 地址");
+    }
+
     /**
      * 易支付下单流程
      */
     private void createEpayPayment(PaymentChannel channel, Order order, String paymentMethod, BigDecimal amount, String device) {
-        String epayType = EPAY_TYPE_MAP.get(paymentMethod.toLowerCase());
+        String epayType = epayType(paymentMethod);
         if (epayType == null) {
             throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.CHANNEL_UNAVAILABLE, "该渠道不支持易支付");
         }
@@ -150,21 +186,25 @@ public class PaymentServiceImpl implements PaymentService {
         ChannelConfig config = buildChannelConfig(channel);
         String productName = buildProductName(order.getId());
 
-        EpayResult epayResult = epayService.createPayment(
-                config,
-                order.getId().toString(),
-                epayType,
-                productName,
-                amount,
-                order.getClientIp(),
-                device
-        );
+        if (!paymentAttempts.start(order.getId(), channel, config.apiUrl(), config.pid(), amount, "CNY")) return;
+        EpayResult epayResult;
+        try {
+            epayResult = epayService.createPayment(config, order.getId().toString(), epayType,
+                    productName, amount, order.getClientIp(), device);
+            if (epayResult.tradeNo() == null || epayResult.tradeNo().isBlank()
+                    || (epayResult.payUrl() == null && epayResult.qrcodeUrl() == null)) {
+                throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "支付平台建单结果不完整");
+            }
+        } catch (RuntimeException failure) {
+            recordCreateFailure(order.getId(), failure);
+            return;
+        }
 
         // 分别存储：payUrl 是 H5 跳转链接，qrcodeUrl 是二维码 URL
         order.setPaymentUrl(epayResult.payUrl());
         order.setQrcodeUrl(epayResult.qrcodeUrl());
         order.setEpayTradeNo(epayResult.tradeNo());
-        inventoryLifecycle.storePaymentDetails(order);
+        inventoryLifecycle.storePaymentDetails(order, epayResult.tradeNo(), null);
     }
 
     /**
@@ -177,6 +217,7 @@ public class PaymentServiceImpl implements PaymentService {
         String pid = requireConfig(cfg, "pid", channel.getChannelCode());
         String key = requireConfig(cfg, "key", channel.getChannelCode());
         String apiUrl = requireConfig(cfg, "api_url", channel.getChannelCode());
+        requireHttpUrl(apiUrl, "api_url", false);
         String notifyUrl = requireConfig(cfg, "notify_url", channel.getChannelCode());
         String returnUrl = requireConfig(cfg, "return_url", channel.getChannelCode());
 
@@ -191,6 +232,7 @@ public class PaymentServiceImpl implements PaymentService {
         result.put("payment_url", effectiveUrl);
         result.put("qrcode_url", order.getQrcodeUrl());
         result.put("pay_url", order.getPaymentUrl());
+        result.put("payment_setup_pending", effectiveUrl == null || effectiveUrl.isBlank());
         result.put("expires_at", order.getExpiresAt());
         result.put("settlement_currency", "CNY");
         result.put("settlement_amount",order.getActualAmount());
@@ -204,6 +246,13 @@ public class PaymentServiceImpl implements PaymentService {
             result.put("chain", order.getUsdtChain());
         }
         return result;
+    }
+
+    private void recordCreateFailure(UUID orderId, RuntimeException failure) {
+        boolean rejected = failure instanceof com.simplecard.exception.PaymentRejectedException;
+        paymentAttempts.creationFailed(orderId, rejected);
+        if (rejected) throw failure;
+        log.warn("Payment creation outcome unknown: order={}, cause={}", orderId, failure.getClass().getSimpleName());
     }
 
     private String buildProductName(UUID orderId) {
@@ -226,7 +275,7 @@ public class PaymentServiceImpl implements PaymentService {
             }
             return result;
         } catch (Exception e) {
-            log.warn("Failed to parse channel config_data: {}", e.getMessage());
+            log.warn("Failed to parse payment channel configuration: error={}", e.getClass().getSimpleName());
             return Map.of();
         }
     }

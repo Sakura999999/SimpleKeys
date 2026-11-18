@@ -3,17 +3,14 @@ package com.simplecard.service.impl;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.simplecard.constant.ErrorCode;
-import com.simplecard.constant.OrderStatus;
 import com.simplecard.entity.Order;
 import com.simplecard.entity.UnmatchedTransaction;
 import com.simplecard.exception.BusinessException;
-import com.simplecard.repository.OrderRepository;
 import com.simplecard.repository.UnmatchedTransactionRepository;
 import com.simplecard.service.TxidVerifyService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 
 import java.math.BigDecimal;
@@ -23,16 +20,12 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class TxidVerifyServiceImpl implements TxidVerifyService {
 
-    private final OrderRepository orderRepository;
-    private final com.simplecard.service.PaymentInboxService paymentInbox;
-    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final UnmatchedTransactionRepository unmatchedTransactionRepository;
     private final RestTemplate restTemplate;
     private final ObjectMapper objectMapper;
@@ -47,23 +40,6 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
      */
     private static final String BSC_USDT_CONTRACT = "0x55d398326f99059ff775485246999027b3197955";
 
-    /**
-     * 已知 USDT 合约地址集合（小写）
-     */
-    private static final Set<String> USDT_CONTRACTS = Set.of(
-            TRON_USDT_CONTRACT.toLowerCase(),
-            BSC_USDT_CONTRACT.toLowerCase()
-    );
-
-    /**
-     * 交易时间校验缓冲（秒）：链上交易时间必须 ≥ 订单创建时间 - 此缓冲值。
-     * 正常流程中用户必须先拿到钱包地址才能转账，交易一定在订单之后；
-     * 120 秒缓冲用于应对服务器与区块链节点之间的时钟偏差（NTP 同步后通常 < 1 秒），
-     * 以及纵深防御"先看到链上交易再创建订单提交 TXID"的攻击路径。
-     * 主防线为 Step 6 的精确金额匹配，时间校验为辅助层。
-     */
-    private static final long TX_TIME_BUFFER_SECONDS = 120;
-
     @Override
     public VerifyDetail verifyAndProcess(Order order, String txid) {
         String chain = order.getUsdtChain();
@@ -77,7 +53,7 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
                 throw new BusinessException(ErrorCode.TOO_MANY_REQUESTS,"链上查询繁忙，请稍后重试",org.springframework.http.HttpStatus.TOO_MANY_REQUESTS);
             if (e instanceof org.springframework.web.client.RestClientException)
                 throw new BusinessException(ErrorCode.MAINTENANCE,"链上查询暂不可用，请稍后重试",org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE);
-            log.error("链上 API 查询失败: chain={}, txid={}, error={}", chain, txid, e.getMessage());
+            log.warn("Chain lookup failed: order={}, error={}", order.getId(), e.getClass().getSimpleName());
             saveUnmatched(order, txid, chain, VerifyResult.PENDING_REVIEW,
                     "CHAIN_API_ERROR", null, null, null);
             return new VerifyDetail(VerifyResult.PENDING_REVIEW,
@@ -95,7 +71,7 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
         }
 
         // ---- Step 3: 收款地址是否匹配我方钱包 ----
-        if (!tx.to.equalsIgnoreCase(order.getUsdtWalletAddress())) {
+        if (!sameRecipient(chain, tx.to, order.getUsdtWalletAddress())) {
             saveUnmatched(order, txid, chain, VerifyResult.AUTO_REJECTED,
                     "ADDRESS_MISMATCH", tx.from, tx.to, tx.amount);
             return new VerifyDetail(VerifyResult.AUTO_REJECTED,
@@ -104,7 +80,7 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
 
         // ---- Step 4: Token 合约是否为 USDT ----
         // F5: 必须校验 contractAddress 非 null — 否则原生代币（TRX/BNB）转账会绕过此检查
-        if (tx.contractAddress == null || !USDT_CONTRACTS.contains(tx.contractAddress.toLowerCase())) {
+        if (!isUsdtContract(chain, tx.contractAddress)) {
             saveUnmatched(order, txid, chain, VerifyResult.AUTO_REJECTED,
                     "NOT_USDT", tx.from, tx.to, tx.amount);
             return new VerifyDetail(VerifyResult.AUTO_REJECTED,
@@ -123,7 +99,7 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
         long orderCreatedEpoch = order.getCreatedAt()
                 .atZone(ZoneId.systemDefault())
                 .toEpochSecond();
-        if (tx.blockTimestamp < orderCreatedEpoch - TX_TIME_BUFFER_SECONDS) {
+        if (tx.blockTimestamp < orderCreatedEpoch) {
             log.warn("TXID verify: transaction too old, txid={}, txTime={}, orderCreated={}, orderId={}",
                     txid, tx.blockTimestamp, orderCreatedEpoch, order.getId());
             saveUnmatched(order, txid, chain, VerifyResult.AUTO_REJECTED,
@@ -132,37 +108,10 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
                     "TX_TOO_OLD", tx.from, tx.to, tx.amount, true);
         }
 
-        // ---- Step 6: 金额判定（仅精确匹配自动通过，任何差异转人工审核） ----
-        // 安全设计：BEpusdt 使用 2 位小数顺序递增分配金额（如 45.44, 45.45），
-        // 容差式自动通过会被攻击者利用相邻金额的 TXID 盗刷。
-        // 因此仅精确匹配（diff=0）才自动通过，任何金额不一致均转人工审核。
-        BigDecimal expected = new BigDecimal(order.getUsdtCryptoAmount());
-        BigDecimal actual = new BigDecimal(tx.amount);
-        BigDecimal diff = expected.subtract(actual).abs();
-
-        if (diff.compareTo(BigDecimal.ZERO) == 0) {
-            // 精确匹配 → 自动通过，TXID UNIQUE 约束兜底防并发
-
-            try {
-                paymentInbox.accept("txid_"+chain+"_"+txid,"txid",order.getId(),txid);
-            } catch (org.springframework.dao.DataIntegrityViolationException e) {
-                // TXID 已被 webhook 或其他请求抢先写入（UNIQUE 约束冲突）
-                // flush 失败后 Hibernate Session 不一致，不能正常 return（Spring 的 commit 会抛异常），
-                // 必须抛出 RuntimeException 让 @Transactional 走回滚路径，由 GlobalExceptionHandler 返回业务错误。
-                log.warn("TXID verify: unique constraint violation (webhook race), txid={}, orderId={}", txid, order.getId());
-                throw new BusinessException(ErrorCode.TXID_ALREADY_USED, "该交易哈希已被其他订单使用");
-            }
-            saveUnmatched(order, txid, chain, VerifyResult.AUTO_APPROVED,
-                    "AUTO_APPROVED", tx.from, tx.to, tx.amount);
-            return new VerifyDetail(VerifyResult.AUTO_APPROVED,
-                    "AUTO_APPROVED", tx.from, tx.to, tx.amount, true);
-        }
-
-        // 金额不匹配 → 统一转人工审核（覆盖手续费少付、输入误差等场景）
-        saveUnmatched(order, txid, chain, VerifyResult.PENDING_REVIEW,
-                "AMOUNT_MISMATCH:" + diff.toPlainString(), tx.from, tx.to, tx.amount);
-        return new VerifyDetail(VerifyResult.PENDING_REVIEW,
-                "AMOUNT_MISMATCH:" + diff.toPlainString(), tx.from, tx.to, tx.amount, true);
+        BigDecimal diff = new BigDecimal(order.getUsdtCryptoAmount()).subtract(new BigDecimal(tx.amount)).abs();
+        String reason = diff.signum() == 0 ? "ORDER_OWNERSHIP_REVIEW_REQUIRED" : "AMOUNT_MISMATCH:" + diff.toPlainString();
+        saveUnmatched(order, txid, chain, VerifyResult.PENDING_REVIEW, reason, tx.from, tx.to, tx.amount);
+        return new VerifyDetail(VerifyResult.PENDING_REVIEW, reason, tx.from, tx.to, tx.amount, true);
     }
 
     /**
@@ -180,102 +129,59 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
     /**
      * 查询链上交易
      */
-    private ChainTransaction queryTransaction(String chain, String txid) {
-        return queryTransaction(chain, txid, true);
+    private boolean sameRecipient(String chain, String actual, String expected) {
+        if (actual == null || expected == null) return false;
+        return "usdt_bep20".equals(chain) ? actual.equalsIgnoreCase(expected) : actual.equals(expected);
     }
 
-    private ChainTransaction queryTransaction(String chain, String txid, boolean requireSolidified) {
-        if (chain != null && chain.contains("trc20")) {
-            return queryTronTransaction(txid, requireSolidified);
-        } else if (chain != null && chain.contains("bep20")) {
+    private boolean isUsdtContract(String chain, String address) {
+        if ("usdt_trc20".equals(chain)) return TRON_USDT_CONTRACT.equals(address);
+        return "usdt_bep20".equals(chain) && BSC_USDT_CONTRACT.equalsIgnoreCase(address);
+    }
+
+    private ChainTransaction queryTransaction(String chain, String txid) {
+        if ("usdt_trc20".equals(chain)) {
+            return queryTronTransaction(txid);
+        } else if ("usdt_bep20".equals(chain)) {
             return queryBscTransaction(txid);
         }
         throw new BusinessException(ErrorCode.TXID_VERIFY_FAILED, "不支持的链类型: " + chain);
     }
 
-    /**
-     * 通过 TronGrid API 查询 TRC20 交易
-     */
-    private ChainTransaction queryTronTransaction(String txid, boolean requireSolidified) {
-        String url = "https://api.trongrid.io/v1/transactions/" + txid + "/events";
-        log.info("Querying TronGrid: {}", url);
+    private static final String TRANSFER_TOPIC = "ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
-        String responseBody = restTemplate.getForObject(url, String.class);
-        if (responseBody == null) return null;
+    private ChainTransaction queryTronTransaction(String txid) {
+        String url = "https://api.trongrid.io/walletsolidity/gettransactioninfobyid";
+        String response = restTemplate.postForObject(url, Map.of("value", txid), String.class);
+        if (response == null || response.isBlank()) return null;
 
         try {
-            Map<String, Object> result = objectMapper.readValue(responseBody, new TypeReference<>() {});
-            log.debug("TronGrid response: {}", responseBody);
+            var receipt = objectMapper.readTree(response);
+            if (!txid.equalsIgnoreCase(receipt.path("id").asText())
+                    || "FAILED".equals(receipt.path("result").asText())
+                    || !"SUCCESS".equals(receipt.path("receipt").path("result").asText())
+                    || !receipt.path("blockTimeStamp").isIntegralNumber()) return null;
 
-            Boolean success = (Boolean) result.get("success");
-            if (!Boolean.TRUE.equals(success)) return null;
-
-            @SuppressWarnings("unchecked")
-            List<Map<String, Object>> data = (List<Map<String, Object>>) result.get("data");
-            if (data == null || data.isEmpty()) return null;
-
-            // 查找 Transfer 事件
-            for (Map<String, Object> event : data) {
-                String eventName = (String) event.get("event_name");
-                if (!"Transfer".equals(eventName)) continue;
-
-                String contractAddress = (String) event.get("contract_address");
-                @SuppressWarnings("unchecked")
-                Map<String, Object> eventResult = (Map<String, Object>) event.get("result");
-                if (eventResult == null) continue;
-
-                String from = hexToTronBase58((String) eventResult.get("from"));
-                String to = hexToTronBase58((String) eventResult.get("to"));
-                Object valueObj = eventResult.get("value");
-                String rawValue = valueObj != null ? valueObj.toString() : "0";
-
-                // TRC20 USDT 精度为 6 位
-                BigDecimal amount = new BigDecimal(rawValue).movePointLeft(6);
-
-                // 提取区块时间戳（TronGrid 事件数据中已包含 block_timestamp，毫秒级）
-                Long blockTimestamp = null;
-                Object blockTsObj = event.get("block_timestamp");
-                if (blockTsObj instanceof Number) {
-                    blockTimestamp = ((Number) blockTsObj).longValue() / 1000; // 毫秒 → 秒
-                }
-
-                // 手动 TXID 验证：通过 walletsolidity API 验证交易是否已 solidified（不可逆确认）
-                // Webhook 回调：跳过 solidification 检查（BEpusdt 自己扫链发现的交易，可信度高）
-                boolean confirmed = !requireSolidified || checkTronTransactionConfirmed(txid);
-                return new ChainTransaction(from, to, amount.toPlainString(), contractAddress, confirmed, blockTimestamp);
+            ChainTransaction transfer = null;
+            for (var log : receipt.path("log")) {
+                String emitter = log.path("address").asText();
+                if (!emitter.matches("(?i)[a-f0-9]{40}") || !TRON_USDT_CONTRACT.equals(hexToTronBase58(emitter))) continue;
+                var topics = log.path("topics");
+                if (topics.size() != 3 || !TRANSFER_TOPIC.equalsIgnoreCase(topics.path(0).asText())) continue;
+                String from = topics.path(1).asText();
+                String to = topics.path(2).asText();
+                String data = log.path("data").asText();
+                if (!from.matches("(?i)0{24}[a-f0-9]{40}") || !to.matches("(?i)0{24}[a-f0-9]{40}")
+                        || !data.matches("(?i)[a-f0-9]{64}")) return null;
+                // The current settlement model conservatively handles one USDT transfer per hash.
+                if (transfer != null) return null;
+                BigDecimal amount = new BigDecimal(new BigInteger(data, 16), 6);
+                transfer = new ChainTransaction(hexToTronBase58(from.substring(24)), hexToTronBase58(to.substring(24)),
+                        amount.toPlainString(), TRON_USDT_CONTRACT, true, receipt.path("blockTimeStamp").asLong() / 1000);
             }
-            return null;
-        } catch (Exception e) {
-            log.error("Failed to parse TronGrid response: {}", e.getMessage());
-            throw new RuntimeException("TronGrid API 解析失败", e);
-        }
-    }
-
-    /**
-     * 通过 TronGrid walletsolidity API 验证交易是否已达到不可逆确认状态。
-     * walletsolidity 端点仅返回已 solidified（19 个区块确认）的交易信息。
-     */
-    private boolean checkTronTransactionConfirmed(String txid) {
-        try {
-            String url = "https://api.trongrid.io/walletsolidity/gettransactioninfobyid";
-            Map<String, String> body = Map.of("value", txid);
-            String response = restTemplate.postForObject(url, body, String.class);
-            if (response == null || response.isBlank() || "{}".equals(response.trim())) {
-                log.warn("TronGrid solidity: transaction not yet solidified, txid={}", txid);
-                return false;
-            }
-            Map<String, Object> info = objectMapper.readValue(response, new TypeReference<>() {});
-            // 如果无 id 字段，说明交易未被 solidified
-            if (!info.containsKey("id")) return false;
-            // 检查 receipt.result: "SUCCESS" 或 null/absent 均视为成功
-            @SuppressWarnings("unchecked")
-            Map<String, Object> receipt = (Map<String, Object>) info.get("receipt");
-            if (receipt == null) return true; // 无 receipt 表示简单转账，视为成功
-            String receiptResult = (String) receipt.get("result");
-            return receiptResult == null || "SUCCESS".equals(receiptResult) || "DEFAULT".equals(receiptResult);
-        } catch (Exception e) {
-            log.warn("Failed to verify TronGrid transaction confirmation: txid={}, error={}", txid, e.getMessage());
-            return false; // Fail-safe: 未确认则拒绝
+            return transfer;
+        } catch (java.io.IOException invalid) {
+            throw new IllegalStateException("Invalid TRON receipt", invalid);
         }
     }
 
@@ -306,45 +212,46 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
             if (receipt == null) return null;
 
             String statusHex = (String) receipt.get("status");
-            boolean confirmed = "0x1".equals(statusHex);
+            if (!"0x1".equals(statusHex) || !txid.equalsIgnoreCase((String) receipt.get("transactionHash"))) return null;
 
             // 通过 blockNumber 查询区块时间戳
             String blockNumberHex = (String) receipt.get("blockNumber");
-            Long blockTimestamp = queryBscBlockTimestamp(rpcUrl, blockNumberHex);
+            Long blockTimestamp = queryFinalizedBscBlockTimestamp(rpcUrl, blockNumberHex, (String) receipt.get("blockHash"));
+            if (blockTimestamp == null) return null;
 
             // 解析 Transfer 事件日志
             // Transfer(address indexed from, address indexed to, uint256 value)
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> logs = (List<Map<String, Object>>) receipt.get("logs");
-            if (logs == null || logs.isEmpty()) {
-                return new ChainTransaction(null, null, "0", null, confirmed, blockTimestamp);
-            }
+            if (logs == null) return null;
 
-            String transferSig = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
-
+            ChainTransaction transfer = null;
             for (Map<String, Object> logEntry : logs) {
                 @SuppressWarnings("unchecked")
                 List<String> topics = (List<String>) logEntry.get("topics");
-                if (topics == null || topics.size() < 3) continue;
-                if (!transferSig.equals(topics.get(0))) continue;
-
                 String contractAddress = (String) logEntry.get("address");
+                if (!BSC_USDT_CONTRACT.equalsIgnoreCase(contractAddress) || topics == null || topics.size() != 3
+                        || !("0x" + TRANSFER_TOPIC).equalsIgnoreCase(topics.get(0))) continue;
+                if (transfer != null || Boolean.TRUE.equals(logEntry.get("removed"))) return null;
+                String data = (String) logEntry.get("data");
+                if (!topics.get(1).matches("(?i)0x0{24}[a-f0-9]{40}")
+                        || !topics.get(2).matches("(?i)0x0{24}[a-f0-9]{40}")
+                        || data == null || !data.matches("(?i)0x[a-f0-9]{64}")) return null;
                 // topics[1] = from（32 字节左填充，取后 40 位 hex）
                 String from = "0x" + topics.get(1).substring(26);
                 // topics[2] = to
                 String to = "0x" + topics.get(2).substring(26);
                 // data = value（uint256 hex）
-                String data = (String) logEntry.get("data");
                 BigInteger rawValue = new BigInteger(data.substring(2), 16);
                 // BSC USDT (Binance-Peg BSC-USD) 精度为 18 位
                 BigDecimal amount = new BigDecimal(rawValue).movePointLeft(18);
 
-                return new ChainTransaction(from, to, amount.toPlainString(), contractAddress, confirmed, blockTimestamp);
+                transfer = new ChainTransaction(from, to, amount.toPlainString(), contractAddress, true, blockTimestamp);
             }
 
-            return new ChainTransaction(null, null, "0", null, confirmed, blockTimestamp);
+            return transfer;
         } catch (Exception e) {
-            log.error("Failed to parse BSC RPC response: {}", e.getMessage());
+            log.warn("Failed to parse BSC receipt: error={}", e.getClass().getSimpleName());
             throw new RuntimeException("BSC RPC 解析失败", e);
         }
     }
@@ -357,30 +264,29 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
      * @param blockNumberHex 区块号（hex，如 "0x541c1a1"）
      * @return 秒级 Unix 时间戳，查询失败返回 null
      */
-    private Long queryBscBlockTimestamp(String rpcUrl, String blockNumberHex) {
-        if (blockNumberHex == null) return null;
+    private Long queryFinalizedBscBlockTimestamp(String rpcUrl, String blockNumberHex, String blockHash) {
+        if (blockNumberHex == null || blockHash == null) return null;
         try {
-            Map<String, Object> blockRequest = Map.of(
-                    "jsonrpc", "2.0",
-                    "method", "eth_getBlockByNumber",
-                    "params", List.of(blockNumberHex, false),  // false = 不返回交易详情，只要区块头
-                    "id", 2
-            );
-            String blockResponse = restTemplate.postForObject(rpcUrl, blockRequest, String.class);
-            if (blockResponse == null) return null;
-
-            Map<String, Object> blockRpc = objectMapper.readValue(blockResponse, new TypeReference<>() {});
-            @SuppressWarnings("unchecked")
-            Map<String, Object> blockResult = (Map<String, Object>) blockRpc.get("result");
-            if (blockResult == null) return null;
-
-            String timestampHex = (String) blockResult.get("timestamp");
-            if (timestampHex == null) return null;
-            return Long.parseLong(timestampHex.substring(2), 16);
+            if (!"0x38".equals(bscRpc(rpcUrl, "eth_chainId", List.of()))) return null;
+            if (!(bscRpc(rpcUrl, "eth_getBlockByNumber", List.of("finalized", false)) instanceof Map<?, ?> finalized)
+                    || !(finalized.get("number") instanceof String latest)
+                    || Long.decode(blockNumberHex) > Long.decode(latest)) return null;
+            if (!(bscRpc(rpcUrl, "eth_getBlockByNumber", List.of(blockNumberHex, false)) instanceof Map<?, ?> canonical)
+                    || !(canonical.get("hash") instanceof String canonicalHash)
+                    || !blockHash.equalsIgnoreCase(canonicalHash)
+                    || !(canonical.get("timestamp") instanceof String timestamp)) return null;
+            return Long.decode(timestamp);
         } catch (Exception e) {
-            log.warn("Failed to query BSC block timestamp: blockNumber={}, error={}", blockNumberHex, e.getMessage());
+            log.warn("Failed to query BSC finality: error={}", e.getClass().getSimpleName());
             return null;
         }
+    }
+
+    private Object bscRpc(String url, String method, List<?> params) throws java.io.IOException {
+        String response = restTemplate.postForObject(url,
+                Map.of("jsonrpc", "2.0", "method", method, "params", params, "id", 2), String.class);
+        if (response == null) return null;
+        return objectMapper.treeToValue(objectMapper.readTree(response).get("result"), Object.class);
     }
 
     @Override
@@ -389,26 +295,25 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
                                                LocalDateTime orderCreatedAt) {
         ChainTransaction tx;
         try {
-            // Webhook 回调来自 BEpusdt 自身的链上扫描，可信度高，跳过 TRC20 solidification 检查
-            tx = queryTransaction(chain, txid, false);
+            tx = queryTransaction(chain, txid);
         } catch (Exception e) {
-            log.warn("Webhook on-chain query failed: chain={}, txid={}, error={}", chain, txid, e.getMessage());
+            log.warn("Webhook chain lookup failed: chain={}, txid={}, error={}", chain, txid, e.getClass().getSimpleName());
             return null; // 查询失败 → 调用方应触发重试
         }
 
         // 1. 交易是否存在
-        if (tx == null) {
-            return new ChainVerifyResult(false, "交易不存在");
+        if (tx == null || !tx.confirmed()) {
+            return null;
         }
 
         // 2. 收款地址是否匹配
-        if (tx.to() == null || !tx.to().equalsIgnoreCase(expectedWalletAddress)) {
+        if (!sameRecipient(chain, tx.to(), expectedWalletAddress)) {
             return new ChainVerifyResult(false,
                     "收款地址不匹配: expected=" + expectedWalletAddress + ", actual=" + tx.to());
         }
 
         // 3. Token 合约是否为 USDT
-        if (tx.contractAddress() == null || !USDT_CONTRACTS.contains(tx.contractAddress().toLowerCase())) {
+        if (!isUsdtContract(chain, tx.contractAddress())) {
             return new ChainVerifyResult(false, "非 USDT 合约交易");
         }
 
@@ -420,19 +325,16 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
         long orderCreatedEpoch = orderCreatedAt
                 .atZone(ZoneId.systemDefault())
                 .toEpochSecond();
-        if (tx.blockTimestamp() < orderCreatedEpoch - TX_TIME_BUFFER_SECONDS) {
+        if (tx.blockTimestamp() < orderCreatedEpoch) {
             return new ChainVerifyResult(false,
                     "交易时间早于订单创建: txTime=" + tx.blockTimestamp() + ", orderCreated=" + orderCreatedEpoch);
         }
 
         // 5. 金额是否匹配
-        // 注意：此处 0.001 容差仅用于对齐 BEpusdt 回调金额与我们独立链上查询结果之间的浮点精度差异，
-        // 不同于 verifyAndProcess 的精确匹配策略。Webhook 路径的主金额校验在 WebhookServiceImpl
-        // 中已完成精确比对（compareTo != 0），此处为纵深防御的链上二次验证。
         try {
             BigDecimal expected = new BigDecimal(expectedCryptoAmount);
             BigDecimal actual = new BigDecimal(tx.amount());
-            if (expected.subtract(actual).abs().compareTo(new BigDecimal("0.001")) > 0) {
+            if (expected.compareTo(actual) != 0) {
                 return new ChainVerifyResult(false,
                         "金额不匹配: expected=" + expectedCryptoAmount + ", actual=" + tx.amount());
             }
@@ -440,7 +342,8 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
             return new ChainVerifyResult(false, "金额格式异常");
         }
 
-        return new ChainVerifyResult(true, "链上验证通过");
+        return new ChainVerifyResult(true, "链上验证通过",
+                LocalDateTime.ofInstant(java.time.Instant.ofEpochSecond(tx.blockTimestamp()), ZoneId.systemDefault()));
     }
 
     /**
@@ -495,7 +398,7 @@ public class TxidVerifyServiceImpl implements TxidVerifyService {
             System.arraycopy(hash2, 0, addressWithChecksum, rawAddress.length, 4);
             return base58Encode(addressWithChecksum);
         } catch (Exception e) {
-            log.warn("Failed to convert hex to Tron Base58: {}, returning original", hexAddress);
+            log.warn("Failed to convert hex to Tron Base58: error={}", e.getClass().getSimpleName());
             return hexAddress;
         }
     }

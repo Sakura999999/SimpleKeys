@@ -48,7 +48,7 @@ public class EpayServiceImpl implements EpayService {
         params.put("sign", sign);
         params.put("sign_type", "MD5");
 
-        log.info("Epay createPayment: outTradeNo={}, type={}, money={}, apiUrl={}", outTradeNo, type, money, config.apiUrl());
+        log.info("Epay createPayment: order={}, type={}, amount={}", outTradeNo, type, money);
 
         // Build form-urlencoded body
         MultiValueMap<String, String> formData = new LinkedMultiValueMap<>();
@@ -60,75 +60,53 @@ public class EpayServiceImpl implements EpayService {
 
         String url = config.apiUrl() + (config.apiUrl().endsWith("/") ? "" : "/") + "mapi.php";
 
-        // 带重试的网络调用（最多重试 2 次，间隔 1 秒）
-        int maxRetries = 2;
-        Exception lastException = null;
+        // Without a gateway idempotency guarantee, a failed transport leaves an unknown outcome.
+        try {
+            ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
+            String responseBody = response.getBody();
 
-        for (int attempt = 0; attempt <= maxRetries; attempt++) {
-            try {
-                if (attempt > 0) {
-                    log.info("Epay API retry attempt {}/{}", attempt, maxRetries);
-                    Thread.sleep(1000);
-                }
-
-                ResponseEntity<String> response = restTemplate.postForEntity(url, request, String.class);
-                String responseBody = response.getBody();
-
-                if (responseBody == null || responseBody.isBlank()) {
-                    log.error("Epay API returned null/empty body");
-                    throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建失败：响应为空");
-                }
-
-                log.debug("Epay API raw response: {}", responseBody);
-
-                Map<String, Object> body;
-                try {
-                    body = objectMapper.readValue(responseBody, new TypeReference<>() {});
-                } catch (Exception parseEx) {
-                    log.error("Epay API response is not valid JSON: {}", responseBody);
-                    throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建失败：响应格式异常");
-                }
-
-                int code = body.get("code") instanceof Number n ? n.intValue() : -1;
-                String msg = body.get("msg") != null ? body.get("msg").toString() : "";
-                String tradeNo = body.get("trade_no") != null ? body.get("trade_no").toString() : "";
-                String payUrl = body.get("payurl") != null ? body.get("payurl").toString() : null;
-                String qrcode = body.get("qrcode") != null ? body.get("qrcode").toString() : null;
-                String urlscheme = body.get("urlscheme") != null ? body.get("urlscheme").toString() : null;
-
-                log.info("Epay API response: code={}, msg={}, tradeNo={}, payUrl={}, qrcode={}", code, msg, tradeNo, payUrl, qrcode);
-
-                if (code != 1) {
-                    // 业务错误不重试
-                    log.error("Epay API error: code={}, msg={}", code, msg);
-                    throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建失败：" + msg);
-                }
-
-                String resultQrcode = qrcode != null ? qrcode : urlscheme;
-
-                // 网关未返回 payUrl 且为移动端请求时，将 qrcode（收银台页面 URL）作为 H5 跳转入口
-                String effectivePayUrl = payUrl;
-                if (effectivePayUrl == null && device != null && !"pc".equals(device) && resultQrcode != null) {
-                    effectivePayUrl = resultQrcode;
-                    log.info("Epay: gateway returned no payUrl, using qrcode URL as mobile redirect: {}", effectivePayUrl);
-                }
-
-                return new EpayResult(code, msg, tradeNo, effectivePayUrl, resultQrcode);
-
-            } catch (BusinessException e) {
-                throw e; // 业务异常直接抛出，不重试
-            } catch (InterruptedException e) {
-                // 恢复中断标志并立即放弃重试 — 吞掉中断会让线程池无法正常关闭
-                Thread.currentThread().interrupt();
-                throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建被中断，请重试");
-            } catch (Exception e) {
-                lastException = e;
-                log.warn("Epay API attempt {} failed: {}", attempt + 1, e.getMessage());
+            if (responseBody == null || responseBody.isBlank()) {
+                log.error("Epay API returned null/empty body");
+                throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建失败：响应为空");
             }
-        }
 
-        log.error("Epay API call failed after {} retries", maxRetries + 1, lastException);
-        throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建失败：网络超时，请重试");
+            Map<String, Object> body;
+            try {
+                body = objectMapper.readValue(responseBody, new TypeReference<>() {});
+            } catch (Exception parseEx) {
+                log.warn("Epay create response was not valid JSON: order={}", outTradeNo);
+                throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付创建失败：响应格式异常");
+            }
+
+            int code = body.get("code") instanceof Number n ? n.intValue() : -1;
+            String tradeNo = body.get("trade_no") != null ? body.get("trade_no").toString() : "";
+            String payUrl = body.get("payurl") != null ? body.get("payurl").toString() : null;
+            String qrcode = body.get("qrcode") != null ? body.get("qrcode").toString() : null;
+            String urlscheme = body.get("urlscheme") != null ? body.get("urlscheme").toString() : null;
+
+            log.info("Epay create response: order={}, code={}", outTradeNo, code);
+
+            if (code != 1) {
+                // 业务错误不重试
+                throw new com.simplecard.exception.PaymentRejectedException(ErrorCode.WEBHOOK_VERIFY_FAIL, "支付平台拒绝了建单请求");
+            }
+
+            String resultQrcode = qrcode != null ? qrcode : urlscheme;
+
+            // 网关未返回 payUrl 且为移动端请求时，将 qrcode（收银台页面 URL）作为 H5 跳转入口
+            String effectivePayUrl = payUrl;
+            if (effectivePayUrl == null && device != null && !"pc".equals(device) && resultQrcode != null) {
+                effectivePayUrl = resultQrcode;
+            }
+
+            return new EpayResult(code, "", tradeNo, effectivePayUrl, resultQrcode);
+
+        } catch (BusinessException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            log.warn("Epay create outcome unknown: order={}, error={}", outTradeNo, exception.getClass().getSimpleName());
+            throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE, "支付创建结果待核实，请查询原订单");
+        }
     }
 
     @Override
@@ -168,9 +146,10 @@ public class EpayServiceImpl implements EpayService {
             String host = java.net.URI.create(config.apiUrl()).getHost();
             boolean ypay = "www.ezfpy.cn".equalsIgnoreCase(host) || "ezfpy.cn".equalsIgnoreCase(host);
             if (ypay) {
-                // Provider documentation: POST /api/findorder, type=1 uses merchant order ID.
+                // This provider indexes our out_trade_no under type=2, despite its public docs.
                 MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
-                form.add("order_no", outTradeNo); form.add("type", "1");
+                form.add("order_no", outTradeNo);
+                form.add("type", "2");
                 HttpHeaders headers = new HttpHeaders();
                 headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
                 response = restTemplate.postForEntity(config.apiUrl().replaceAll("/+$", "") + "/api/findorder",
@@ -183,43 +162,33 @@ public class EpayServiceImpl implements EpayService {
                 log.warn("Epay order query returned empty body: outTradeNo={}", outTradeNo);
                 return null;
             }
-            // 部分网关实现会在响应中回显请求参数，一并做掩码处理
-            log.debug("Epay order query response: {}", redactKey(body, config.key()));
-
             Map<String, Object> result = objectMapper.readValue(body, new TypeReference<>() {});
 
             Object rawCode = result.get("code");
             if (rawCode != null && !"1".equals(rawCode.toString()) && !"200".equals(rawCode.toString())) {
-                log.warn("Epay query rejected: order={}, code={}", outTradeNo, rawCode);
+                log.warn("Epay query rejected: order={}", outTradeNo);
                 return null;
             }
             if (ypay) {
                 if (!(result.get("data") instanceof Map<?, ?> data)) return null;
                 result = new LinkedHashMap<>();
                 for (var entry : data.entrySet()) if (entry.getKey() instanceof String k) result.put(k, entry.getValue());
-                Object merchantOrder = result.get("out_trade_no");
-                if (merchantOrder != null && !outTradeNo.equals(merchantOrder.toString())) return null;
             }
+            String merchantOrder = Objects.toString(result.get("out_trade_no"), null);
+            String merchant = Objects.toString(result.get("pid"), null);
+            if ((ypay || merchantOrder != null) && !outTradeNo.equals(merchantOrder)) return null;
+            if (merchant != null && !config.pid().equals(merchant)) return null;
+            boolean merchantVerified = outTradeNo.equals(merchantOrder) && (merchant != null || !ypay);
 
             String tradeStatus = result.get("status") != null ? result.get("status").toString() : null;
             String money = result.get("money") != null ? result.get("money").toString() : null;
             String tradeNo = result.get("trade_no") != null ? result.get("trade_no").toString() : null;
-            return new OrderQueryResult(tradeStatus, money, tradeNo);
+            return new OrderQueryResult(tradeStatus, money, tradeNo, merchantVerified);
         } catch (Exception e) {
-            // 不可直接输出 e.getMessage()：RestTemplate 的异常信息通常内嵌完整请求 URL，
-            // 而易支付查询 API 要求商户密钥以 query 参数传递，网关超时/5xx 时密钥会被写进日志。
-            // 该密钥是 webhook 验签的唯一凭据，泄露即可伪造带有效签名的支付成功回调。
-            log.warn("Epay order query failed: outTradeNo={}, error={}",
-                    outTradeNo, redactKey(e.getMessage(), config.key()));
+            // The exception may embed the request URL (including the merchant key) or response content.
+            log.warn("Epay order query failed: order={}, error={}", outTradeNo, e.getClass().getSimpleName());
             return null;
         }
-    }
-
-    /** 将字符串中出现的商户密钥替换为掩码，用于安全地记录日志。 */
-    private String redactKey(String text, String merchantKey) {
-        if (text == null) return null;
-        if (merchantKey == null || merchantKey.isBlank()) return text;
-        return text.replace(merchantKey, "***REDACTED***");
     }
 
     @Override

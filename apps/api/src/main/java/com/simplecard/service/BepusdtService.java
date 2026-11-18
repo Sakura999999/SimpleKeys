@@ -35,6 +35,11 @@ public interface BepusdtService {
      */
     BepusdtPaymentResult createPayment(BepusdtConfig config, String orderId, BigDecimal amount, String productName);
 
+    record OrderQueryResult(String status, String orderId, String tradeId, String tradeType, String walletAddress,
+                            String cryptoAmount, String money, String fiat, String txid) {}
+
+    OrderQueryResult queryOrder(BepusdtConfig config, String tradeId);
+
     /**
      * 生成 MD5 签名（BEpusdt 兼容易支付签名协议）
      */

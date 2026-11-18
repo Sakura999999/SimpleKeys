@@ -5,6 +5,7 @@ import type {
   OrderBrief,
   OrderDetail,
   OrderStatus,
+  PaymentStatusResult,
   PointRecord,
   PointsData,
   ProductCard,
@@ -436,11 +437,11 @@ export const orderApi = {
   createFromCart: (data: CreateCartOrderRequest) =>
     request<CreateOrderResult>("/orders/from-cart", { method: "POST", body: JSON.stringify(data) }),
   getStatus: (orderId: string) =>
-    request<{ order_id: string; status: OrderStatus; expires_at: string; remaining_seconds: number; payment_processing?: boolean; payment_url?: string }>(`/orders/${orderId}/status`),
+    request<PaymentStatusResult>(`/orders/${orderId}/status`),
   cancel: (orderId: string) =>
     request<{ status: OrderStatus }>(`/orders/${orderId}/cancel`, { method: "POST" }),
   refreshStatus: (orderId: string) =>
-    request<{ status: OrderStatus; payment_processing?: boolean }>(`/orders/${orderId}/refresh`, { method: "POST" }),
+    request<PaymentStatusResult>(`/orders/${orderId}/refresh`, { method: "POST" }),
   query: (data: { order_ids?: string[]; emails?: string[] }, opts?: { lookupToken?: string }) =>
     request<OrderBrief[]>("/orders/query", {
       method: "POST",
@@ -818,7 +819,17 @@ export interface PendingPaymentEvent {
   next_attempt_at: string
   last_error?: string
 }
+
+export interface PaymentInboxStatus {
+  list: PendingPaymentEvent[]
+  total: number
+  overdue_count: number
+  backlog_minutes: number
+  discrepancy_count: number
+  discrepancies: { order_id: string; provider: string; next_check_at: string | null }[]
+}
+
 export const adminPaymentInboxApi = {
-  pending: () => request<{ list: PendingPaymentEvent[]; total: number }>("/admin/payment-inbox"),
+  pending: () => request<PaymentInboxStatus>("/admin/payment-inbox"),
   retry: (id: string) => request<boolean>(`/admin/payment-inbox/${id}/retry`, { method: "POST" }),
 }

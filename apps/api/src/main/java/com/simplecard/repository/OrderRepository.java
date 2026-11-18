@@ -54,6 +54,8 @@ public interface OrderRepository extends JpaRepository<Order, UUID> {
 
     Optional<Order> findByUsdtTxId(String usdtTxId);
 
+    boolean existsByUsdtTxIdIgnoreCaseAndIdNot(String usdtTxId, UUID id);
+
     Page<Order> findByUserIdOrderByCreatedAtDesc(UUID userId, Pageable pageable);
 
     Page<Order> findByUserIdAndStatusOrderByCreatedAtDesc(UUID userId, OrderStatus status, Pageable pageable);
@@ -64,6 +66,14 @@ public interface OrderRepository extends JpaRepository<Order, UUID> {
 
     @Query("SELECT o FROM Order o WHERE o.status = com.simplecard.constant.OrderStatus.PENDING AND o.expiresAt < :now")
     List<Order> findExpiredOrders(@Param("now") LocalDateTime now);
+
+    @Query("""
+            select o from Order o where o.paidAt is null and o.expiresAt >= :since
+            and o.status in :statuses and (o.epayTradeNo is not null or o.usdtTradeId is not null)
+            and not exists (select a.id from PaymentAttempt a where a.orderId = o.id)
+            order by o.expiresAt desc, o.id
+            """)
+    List<Order> findLegacyPayments(LocalDateTime since, java.util.Collection<OrderStatus> statuses, Pageable page);
 
     long countByUserIdAndStatus(UUID userId, OrderStatus status);
 

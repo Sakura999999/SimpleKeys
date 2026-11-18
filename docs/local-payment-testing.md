@@ -2,7 +2,7 @@
 
 The local website remains http://localhost:3000. Only GET /api/payments/webhook/epay is exposed through the callback-only proxy (127.0.0.1:8788); login, admin and all other routes return 404 at the public hostname.
 
-Callback: https://sewing-chosen-packed-declare.trycloudflare.com/api/payments/webhook/epay
+Callback: https://raise-aud-heart-dozen.trycloudflare.com/api/payments/webhook/epay
 Return URL: http://localhost:3000/order/query (same-computer browser testing only; not a phone return URL).
 
 Tool: S:/simplecard-dev/cloudflared.exe (downloaded from the official Cloudflare GitHub release; release SHA256 verified).

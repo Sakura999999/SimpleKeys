@@ -3,6 +3,8 @@ import com.simplecard.entity.VerifiedPaymentEvent;
 import com.simplecard.repository.*;
 import com.simplecard.exception.BusinessException;
 import com.simplecard.constant.ErrorCode;
+import com.simplecard.constant.OrderStatus;
+import com.simplecard.entity.Order;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -20,17 +22,21 @@ public class PaymentInboxService {
     private final JdbcTemplate jdbc;
     private final VerifiedPaymentEventRepository events;
     private final OrderItemRepository items;
+    private final OrderRepository orders;
     private final InventoryLifecycleService inventory;
     private final RedisOrderCoordinator coordinator;
     private final TransactionTemplate transaction;
     private final boolean workerEnabled;
-    public PaymentInboxService(JdbcTemplate jdbc,VerifiedPaymentEventRepository events,OrderItemRepository items,
+    public PaymentInboxService(JdbcTemplate jdbc,VerifiedPaymentEventRepository events,OrderItemRepository items,OrderRepository orders,
             InventoryLifecycleService inventory,RedisOrderCoordinator coordinator,PlatformTransactionManager manager,
             @Value("${payment-inbox.worker-enabled:true}") boolean workerEnabled) {
-        this.jdbc=jdbc;this.events=events;this.items=items;this.inventory=inventory;this.coordinator=coordinator;
+        this.jdbc=jdbc;this.events=events;this.items=items;this.orders=orders;this.inventory=inventory;this.coordinator=coordinator;
         this.transaction=new TransactionTemplate(manager);this.transaction.setTimeout(15);this.workerEnabled=workerEnabled;
     }
     public void accept(String key,String channel,UUID orderId,String txid) {
+        accept(key, channel, orderId, txid, null);
+    }
+    public void accept(String key,String channel,UUID orderId,String txid,String reviewReason) {
         if(TransactionSynchronizationManager.isActualTransactionActive()) throw new IllegalStateException("Payment receipt needs its own committed transaction");
         if(key==null || key.isBlank() || key.length()>255 || channel==null || orderId==null)
             throw new BusinessException(ErrorCode.BAD_REQUEST,"付款事件标识无效");
@@ -38,8 +44,8 @@ public class PaymentInboxService {
             throw new BusinessException(ErrorCode.ORDER_NOT_FOUND,"订单不存在");
         LocalDateTime now=LocalDateTime.now();
         // PostgreSQL ON CONFLICT makes duplicate receipt atomic across instances.
-        jdbc.update("insert into verified_payment_events(id,event_key,channel_code,order_id,tx_id,processed,retry_count,next_attempt_at,created_at,updated_at) values(?,?,?,?,?,false,0,?,?,?) on conflict(event_key) do nothing",
-                UUID.randomUUID(),key,channel,orderId,txid,now,now,now);
+        jdbc.update("insert into verified_payment_events(id,event_key,channel_code,order_id,tx_id,review_reason,processed,retry_count,next_attempt_at,created_at,updated_at) values(?,?,?,?,?,?,false,0,?,?,?) on conflict(event_key) do nothing",
+                UUID.randomUUID(),key,channel,orderId,txid,reviewReason,now,now,now);
         VerifiedPaymentEvent event=events.findByEventKey(key).orElseThrow();
         if(!orderId.equals(event.getOrderId()) || !Objects.equals(txid,event.getTxId()) || !channel.equals(event.getChannelCode()))
             throw new BusinessException(ErrorCode.BAD_REQUEST,"付款事件与原记录不一致");
@@ -54,7 +60,7 @@ public class PaymentInboxService {
             return coordinator.execute(keys,()-> transaction.execute(status -> {
                 VerifiedPaymentEvent event=events.lockEvent(id).orElseThrow();
                 if(event.isProcessed()) return true;
-                inventory.confirmPayment(event.getOrderId(),event.getTxId());
+                settle(event);
                 event.setProcessed(true);event.setLastError(null);events.save(event);
                 return true;
             }));
@@ -66,6 +72,24 @@ public class PaymentInboxService {
             if(snapshot.getRetryCount()>=9) log.error("Verified payment requires operator attention: event={}, attempts={}",id,snapshot.getRetryCount()+1);
             log.warn("Verified payment deferred: event={}, attempt={}, cause={}",id,snapshot.getRetryCount()+1,failure.getClass().getSimpleName());
             return false;
+        }
+    }
+    private void settle(VerifiedPaymentEvent event) {
+        Order order = orders.findByIdForUpdate(event.getOrderId()).orElseThrow();
+        if (order.getPaidAt() != null || order.getStatus() == OrderStatus.DELIVERED || order.getStatus() == OrderStatus.REFUNDED) {
+            if (event.getTxId() != null && !event.getTxId().equalsIgnoreCase(order.getUsdtTxId())) {
+                event.setReviewReason("订单已入账，发现另一笔已核验的链上转账");
+            } else if ("epay".equals(event.getChannelCode()) && order.getEpayTradeNo() != null
+                    && !event.getEventKey().equals("epay_" + order.getEpayTradeNo())) {
+                event.setReviewReason("订单已入账，发现另一笔已核验的网关交易");
+            }
+            return;
+        }
+        Order confirmed = inventory.confirmPayment(event.getOrderId(), event.getTxId(), event.getReviewReason());
+        if ("epay".equals(event.getChannelCode()) && confirmed.getPaidAt() != null && confirmed.getEpayTradeNo() == null
+                && event.getEventKey().startsWith("epay_")) {
+            // The verified lookup or signed callback can recover an ID lost during gateway creation.
+            confirmed.setEpayTradeNo(event.getEventKey().substring("epay_".length()));
         }
     }
     @Scheduled(fixedDelayString="${payment-inbox.poll-ms:5000}")
