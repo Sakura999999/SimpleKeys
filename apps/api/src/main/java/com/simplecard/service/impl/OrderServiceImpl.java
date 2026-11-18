@@ -37,6 +37,9 @@ public class OrderServiceImpl implements OrderService {
     private final SiteConfigRepository siteConfigRepository;
     private final PaymentChannelRepository paymentChannelRepository;
     private final SettlementService settlementService;
+    private final PaymentServiceImpl paymentService;
+    private final com.simplecard.service.EpayService epayService;
+    private final com.simplecard.service.PaymentInboxService paymentInbox;
 
     @Override
     @Transactional(readOnly = true)
@@ -109,7 +112,9 @@ public class OrderServiceImpl implements OrderService {
         UUID productId = requireUuid(req, "product_id");
         UUID specId = optionalUuid(req, "spec_id");
         int quantity = requireInt(req, "quantity");
-        String email = optionalString(req, "email");
+        // 归一化（trim + 小写）后再落库：否则 Foo@QQ.com 与 foo@qq.com 会被当成两个邮箱，
+        // 既查不到单，也能绕开"同邮箱待支付订单上限"。历史混合大小写数据由查询侧 lower() 兜住。
+        String email = com.simplecard.common.Emails.normalize(optionalString(req, "email"));
 
         // F4: 购买数量校验（读取后台配置，兜底 999）
         int maxQuantity = getMaxPurchasePerUser();
@@ -207,7 +212,9 @@ public class OrderServiceImpl implements OrderService {
             }
         }
 
-        String email = optionalString(req, "email");
+        // 归一化（trim + 小写）后再落库：否则 Foo@QQ.com 与 foo@qq.com 会被当成两个邮箱，
+        // 既查不到单，也能绕开"同邮箱待支付订单上限"。历史混合大小写数据由查询侧 lower() 兜住。
+        String email = com.simplecard.common.Emails.normalize(optionalString(req, "email"));
         checkPendingOrderLimits(userId, clientIp, email);
         String paymentMethod = optionalString(req, "payment_method");
         validatePaymentMethod(paymentMethod);
@@ -363,7 +370,30 @@ public class OrderServiceImpl implements OrderService {
 
     @Override
     public Map<String, Object> refreshOrderStatus(UUID orderId) {
-        // In a real implementation, this would query the payment provider
+        Order order = orderRepository.findById(orderId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND,"订单不存在"));
+        if (order.getPaidAt() != null || order.getStatus() == OrderStatus.REFUNDED
+                || paymentEvents.existsByOrderIdAndProcessedFalse(orderId)) return getOrderStatus(orderId);
+        PaymentChannel channel = paymentChannelRepository.findByChannelCodeAndIsDeleted(order.getPaymentMethod(),0)
+                .orElseThrow(() -> new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE,"支付渠道不存在"));
+        if (!"epay".equals(channel.getProviderType())) return getOrderStatus(orderId);
+        var query = epayService.queryOrder(paymentService.buildChannelConfig(channel),orderId.toString());
+        if (query == null) throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE,
+                "支付平台暂时无法核实这笔订单，请在平台后台核对，勿重复付款");
+        if ("1".equals(query.tradeStatus()) || "TRADE_SUCCESS".equals(query.tradeStatus())) {
+            if (query.money() == null || query.tradeNo() == null || query.tradeNo().isBlank()
+                    || order.getEpayTradeNo() == null || !order.getEpayTradeNo().equals(query.tradeNo()))
+                throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL,"支付平台交易信息不完整或不匹配，请联系客服核对");
+            try {
+                if (order.getActualAmount().compareTo(new BigDecimal(query.money())) != 0)
+                    throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL,"支付金额不匹配，请联系客服核对");
+            } catch (NumberFormatException e) {
+                throw new BusinessException(ErrorCode.WEBHOOK_VERIFY_FAIL,"支付金额格式异常，请联系客服核对");
+            }
+            paymentInbox.accept("epay_"+query.tradeNo(),"epay",orderId,null);
+        } else if (!"0".equals(query.tradeStatus()) && !"WAIT_BUYER_PAY".equals(query.tradeStatus())) {
+            throw new BusinessException(ErrorCode.CHANNEL_UNAVAILABLE,"支付平台返回了无法识别的订单状态，请联系客服核对");
+        }
         return getOrderStatus(orderId);
     }
 

@@ -34,6 +34,8 @@ import type {
   AuthResult,
   CurrencyItem,
   TxidVerifyResult,
+  EmailLookupSendResult,
+  EmailLookupVerifyResult,
 } from "@/types"
 
 // ============================================================
@@ -126,6 +128,62 @@ function setSessionToken(token: string) {
 
 export function clearSessionToken() {
   localStorage.removeItem("session_token")
+}
+
+// ============================================================
+// Guest order lookup grant（邮箱验证码换来的短期查单凭证）
+// ============================================================
+//
+// 存 sessionStorage 而非 localStorage：关闭标签页即失效，符合"短期通行证"的定位。
+// 同时记录 email，页面据此判断「当前输入的邮箱是否已经验证过」，
+// 避免用户验证了 A 邮箱却在查 B 邮箱时被静默拒绝。
+
+const LOOKUP_GRANT_KEY = "order_lookup_grant"
+
+export interface StoredLookupGrant {
+  token: string
+  /** 已小写的邮箱，与后端规范化规则一致 */
+  email: string
+  /** 到期时间（epoch millis） */
+  expiresAt: number
+}
+
+export function getLookupGrant(): StoredLookupGrant | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = sessionStorage.getItem(LOOKUP_GRANT_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as StoredLookupGrant
+    if (!parsed?.token || !parsed?.email || !parsed?.expiresAt) return null
+    if (parsed.expiresAt <= Date.now()) {
+      sessionStorage.removeItem(LOOKUP_GRANT_KEY)
+      return null
+    }
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+/** 取指定邮箱的有效凭证；邮箱不匹配视为没有凭证 */
+export function getLookupGrantFor(email: string): StoredLookupGrant | null {
+  const grant = getLookupGrant()
+  if (!grant) return null
+  return grant.email === email.trim().toLowerCase() ? grant : null
+}
+
+export function saveLookupGrant(grant: StoredLookupGrant): void {
+  if (typeof window === "undefined") return
+  try {
+    sessionStorage.setItem(LOOKUP_GRANT_KEY, JSON.stringify(grant))
+  } catch {
+    /* 隐私模式下 sessionStorage 可能不可写，忽略即可 */
+  }
+}
+
+export function clearLookupGrant(): void {
+  if (typeof window === "undefined") return
+  sessionStorage.removeItem(LOOKUP_GRANT_KEY)
 }
 
 // ============================================================
@@ -379,12 +437,40 @@ export const orderApi = {
     request<CreateOrderResult>("/orders/from-cart", { method: "POST", body: JSON.stringify(data) }),
   getStatus: (orderId: string) =>
     request<{ order_id: string; status: OrderStatus; expires_at: string; remaining_seconds: number; payment_processing?: boolean; payment_url?: string }>(`/orders/${orderId}/status`),
+  cancel: (orderId: string) =>
+    request<{ status: OrderStatus }>(`/orders/${orderId}/cancel`, { method: "POST" }),
   refreshStatus: (orderId: string) =>
-    request<{ status: OrderStatus }>(`/orders/${orderId}/refresh`, { method: "POST" }),
-  query: (data: { order_ids?: string[]; emails?: string[] }) =>
-    request<OrderBrief[]>("/orders/query", { method: "POST", body: JSON.stringify(data) }),
-  deliver: (data: { order_ids: string[] }) =>
-    request<DeliverResult[]>("/orders/deliver", { method: "POST", body: JSON.stringify(data) }),
+    request<{ status: OrderStatus; payment_processing?: boolean }>(`/orders/${orderId}/refresh`, { method: "POST" }),
+  query: (data: { order_ids?: string[]; emails?: string[] }, opts?: { lookupToken?: string }) =>
+    request<OrderBrief[]>("/orders/query", {
+      method: "POST",
+      body: JSON.stringify(data),
+      headers: opts?.lookupToken ? { "X-Order-Lookup-Token": opts.lookupToken } : undefined,
+    }),
+  deliver: (data: { order_ids: string[] }, opts?: { lookupToken?: string }) =>
+    request<DeliverResult[]>("/orders/deliver", {
+      method: "POST",
+      body: JSON.stringify(data),
+      headers: opts?.lookupToken ? { "X-Order-Lookup-Token": opts.lookupToken } : undefined,
+    }),
+  /** 发送查单验证码。无论该邮箱有无订单，返回都相同。 */
+  sendLookupCode: (email: string) =>
+    request<EmailLookupSendResult>("/order-lookup/send", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+  /** 校验验证码，换取短期查单凭证 */
+  verifyLookupCode: (email: string, code: string) =>
+    request<EmailLookupVerifyResult>("/order-lookup/verify", {
+      method: "POST",
+      body: JSON.stringify({ email, code }),
+    }),
+  /** 主动作废当前查单凭证 */
+  revokeLookupGrant: (lookupToken: string) =>
+    request<void>("/order-lookup/revoke", {
+      method: "POST",
+      headers: { "X-Order-Lookup-Token": lookupToken },
+    }),
   exportKeys: (orderId: string) =>
     request<string>(`/orders/${orderId}/export`),
   submitTxid: (orderId: string, txid: string) =>
@@ -549,6 +635,7 @@ export const adminOrderApi = {
   getDetail: (id: string) =>
     request<AdminOrderItem>(`/admin/orders/${id}`),
   retryDelivery: (id: string) => request<null>(`/admin/orders/${id}/retry-delivery`, { method: "POST" }),
+  requestRefund: (id: string, reason: string) => request<unknown>(`/admin/orders/${id}/refund-request`, { method: "POST", body: JSON.stringify({ reason }) }),
   recordRefund: (id: string, reference: string) => request<null>(`/admin/orders/${id}/refund-record`, { method: "POST", body: JSON.stringify({ reference }) }),
   markPaid: (id: string) =>
     request<null>(`/admin/orders/${id}/mark-paid`, { method: "POST" }),

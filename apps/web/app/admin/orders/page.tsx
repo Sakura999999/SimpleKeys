@@ -55,6 +55,24 @@ export default function AdminOrdersPage() {
 
   const [debouncedSearch, setDebouncedSearch] = useState("")
   const [markPaidConfirm, setMarkPaidConfirm] = useState<string | null>(null)
+  const [refundBusy, setRefundBusy] = useState(false)
+
+  const handleRefund = async (order: AdminOrderItem) => {
+    const processing = order.refund_request?.status === "PROCESSING"
+    const value = window.prompt(processing
+      ? "仅在外部退款已确认成功后填写退款流水号；结果未知时请保留占位，不要重复退款："
+      : "填写退款原因。申请成功后将禁止发货，请先完成申请再去渠道操作退款：")
+    if (!value?.trim()) return
+    setRefundBusy(true)
+    try {
+      if (processing) await adminOrderApi.recordRefund(order.id, value.trim())
+      else await adminOrderApi.requestRefund(order.id, value.trim())
+      toast.success(processing ? "已登记退款成功" : "已申请退款并禁止发货，可进行外部退款")
+      setShowDetail(null)
+      await fetchOrders()
+    } catch (e) { toast.error(e instanceof Error ? e.message : "退款操作失败") }
+    finally { setRefundBusy(false) }
+  }
 
   const fetchOrders = async () => {
     setLoading(true)
@@ -151,7 +169,7 @@ export default function AdminOrdersPage() {
         </button>
       </div>
 
-      <div className="text-sm text-muted-foreground">已付款待处理：补货后可重试发货，或在支付渠道退款成功后登记退款凭证。</div>
+      <div className="text-sm text-muted-foreground">已付款待处理：可补货重试；退款须先申请占位，再进行外部退款，成功后登记凭证。结果未知时保留占位并人工核查。</div>
       {paymentInboxError && <p className="text-sm text-amber-700">暂时无法读取待确认付款，请稍后刷新。</p>}
       {pendingPayments.length > 0 && <section className="rounded-xl border border-amber-300 bg-amber-50/30 p-4">
         <h2 className="font-semibold">已核验付款待处理（系统自动重试中）</h2>
@@ -185,6 +203,7 @@ export default function AdminOrdersPage() {
             <option value="PAID">已支付</option>
             <option value="DELIVERED">已发货</option>
             <option value="EXPIRED">已过期</option>
+            <option value="CANCELLED">已取消</option>
             <option value="PAID_REVIEW">已付款待处理</option>
             <option value="REFUNDED">已退款</option>
           </select>
@@ -503,6 +522,11 @@ export default function AdminOrdersPage() {
               )}
             </div>
             {showDetail.payment_review_reason && <p className="px-6 pb-3 text-sm text-orange-700">{showDetail.payment_review_reason}</p>}
+            {showDetail.refund_request && <div className="px-6 pb-3 text-sm text-orange-700">
+              <p>{showDetail.refund_request.status === "PROCESSING" ? "退款处理中，已禁止发货" : "退款已确认"} · {showDetail.refund_request.amount} {showDetail.refund_request.currency}</p>
+              <p>退款原因：{showDetail.refund_request.reason}</p>
+              <p>申请时间：{new Date(showDetail.refund_request.created_at).toLocaleString()}</p>
+            </div>}
             {showDetail.refund_reference && <p className="px-6 pb-3 text-sm">退款凭证：{showDetail.refund_reference}</p>}
             <div className="flex flex-wrap justify-end gap-3 border-t border-border px-6 py-4">
               <button
@@ -514,8 +538,8 @@ export default function AdminOrdersPage() {
               </button>
       {showDetail.status === "PAID_REVIEW" && (
         <div className="flex gap-3">
-          <button className="rounded-lg border px-3 py-2 text-sm hover:bg-accent" onClick={async () => { try { await adminOrderApi.retryDelivery(showDetail.id); toast.success("已尝试发货，请查看订单最新状态"); setShowDetail(null); await fetchOrders() } catch (e) { toast.error(e instanceof Error ? e.message : "操作失败") } }}>补货后重试发货</button>
-          <button className="rounded-lg border px-3 py-2 text-sm hover:bg-accent" onClick={async () => { const ref = window.prompt("请确认支付渠道已退款成功，并填写退款流水号："); if (!ref?.trim()) return; try { await adminOrderApi.recordRefund(showDetail.id, ref.trim()); setShowDetail(null); await fetchOrders() } catch (e) { toast.error(e instanceof Error ? e.message : "操作失败") } }}>登记已退款</button>
+          {!showDetail.refund_request && <button disabled={refundBusy} className="rounded-lg border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50" onClick={async () => { try { await adminOrderApi.retryDelivery(showDetail.id); toast.success("已尝试发货，请查看订单最新状态"); setShowDetail(null); await fetchOrders() } catch (e) { toast.error(e instanceof Error ? e.message : "操作失败") } }}>补货后重试发货</button>}
+          <button disabled={refundBusy} className="rounded-lg border px-3 py-2 text-sm hover:bg-accent disabled:opacity-50" onClick={() => handleRefund(showDetail)}>{refundBusy ? "处理中…" : showDetail.refund_request?.status === "PROCESSING" ? "确认外部退款成功" : "申请退款并禁止发货"}</button>
         </div>
       )}
               {showDetail.status === "PENDING" && (

@@ -9,6 +9,12 @@ spring:
     driver-class-name: org.h2.Driver
     username: sa
     password:
+  # EmailServiceImpl 构造依赖 JavaMailSender；Spring Boot 只有在 spring.mail.host 存在时
+  # 才会创建该 bean。本文件覆盖了 src/main 的同名配置，缺这一项会让裸 @SpringBootTest
+  # 的 contextLoads 直接启动失败。给一个不会被使用的本地地址即可——mail.enabled 仍为
+  # false，MailAvailability 判定为不可用，测试里不会真的发信。
+  mail:
+    host: localhost
   jpa:
     hibernate:
       ddl-auto: create-drop

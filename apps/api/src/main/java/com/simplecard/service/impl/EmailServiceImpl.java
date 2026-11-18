@@ -8,13 +8,9 @@ import com.simplecard.repository.OrderItemRepository;
 import com.simplecard.repository.OrderRepository;
 import com.simplecard.repository.SiteConfigRepository;
 import com.simplecard.service.EmailService;
-import jakarta.mail.MessagingException;
-import jakarta.mail.internet.MimeMessage;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.mail.javamail.JavaMailSender;
-import org.springframework.mail.javamail.MimeMessageHelper;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -29,27 +25,28 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class EmailServiceImpl implements EmailService {
 
-    private final JavaMailSender mailSender;
+    private final com.simplecard.service.mail.MailDispatcher mailDispatcher;
     private final OrderRepository orderRepository;
     private final OrderItemRepository orderItemRepository;
     private final CardKeyRepository cardKeyRepository;
     private final SiteConfigRepository siteConfigRepository;
-
-    @Value("${mail.enabled:false}")
-    private boolean mailEnabled;
+    private final com.simplecard.config.MailAvailability mailAvailability;
 
     @Value("${mail.site-url:https://example.com}")
     private String siteUrl;
 
-    @Value("${spring.mail.username:}")
-    private String fromAddress;
-
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    @Async
+    /**
+     * 发货通知走独立线程池。
+     *
+     * <p>不共用默认池是有意的：验证码会被刷、会排队，而发货通知是「用户已经付过钱」的信。
+     * 两者共用一个池时，验证码洪峰会把它堵在后面（见 {@link com.simplecard.config.MailExecutorConfig}）。
+     */
+    @Async(com.simplecard.config.MailExecutorConfig.NOTIFICATION_EXECUTOR)
     @Override
     public void sendDeliveryEmail(UUID orderId) {
-        if (!mailEnabled) {
+        if (!mailAvailability.isAvailable()) {
             return;
         }
 
@@ -74,20 +71,94 @@ public class EmailServiceImpl implements EmailService {
 
             String html = buildHtml(order, itemMap, grouped, siteName);
 
-            MimeMessage message = mailSender.createMimeMessage();
-            MimeMessageHelper helper = new MimeMessageHelper(message, true, "UTF-8");
-            helper.setFrom(fromAddress);
-            helper.setTo(order.getEmail());
-            helper.setSubject("【" + siteName + "】订单发货通知 - " + orderId.toString().substring(0, 8));
-            helper.setText(html, true);
-
-            mailSender.send(message);
-            log.info("Delivery email sent for order {} to {}", orderId, order.getEmail());
-        } catch (MessagingException e) {
-            log.error("Failed to send delivery email for order {}: {}", orderId, e.getMessage(), e);
+            // 交给统一发送器：按收件域选通道、失败分类、退避重试、硬退抑制都在那里完成
+            mailDispatcher.send(com.simplecard.service.mail.MailMessage.builder()
+                    .to(order.getEmail())
+                    .subject("【" + siteName + "】订单发货通知 - " + orderId.toString().substring(0, 8))
+                    .html(html)
+                    .purpose(com.simplecard.service.mail.MailPurpose.NOTIFICATION)
+                    .build());
         } catch (Exception e) {
-            log.error("Unexpected error sending delivery email for order {}: {}", orderId, e.getMessage(), e);
+            log.error("Unexpected error preparing delivery email for order {}: {}", orderId, e.getMessage(), e);
         }
+    }
+
+    /**
+     * 发送查单验证码。
+     *
+     * <p><b>异步执行有两个目的：</b>第一，SMTP 握手可能要几秒，同步会让接口在
+     * 「该邮箱确实有订单」时才变慢，形成可观测的时序侧信道；第二，发信失败不能让
+     * 接口报错——否则调用方从「发送成功/失败」就能推断订单是否存在。
+     *
+     * <p>因此本方法不返回是否成功，失败只记日志与计数。
+     *
+     * <p>走独立的验证码线程池：这个池被洪峰打满时只丢验证码（用户可重发），
+     * 不会挤占发货通知。
+     */
+    @Async(com.simplecard.config.MailExecutorConfig.VERIFICATION_EXECUTOR)
+    @Override
+    public void sendVerificationCode(String toEmail, String code, int ttlMinutes) {
+        if (!mailAvailability.isAvailable()) {
+            log.debug("Skip verification code mail: SMTP unavailable ({})", mailAvailability.describe());
+            return;
+        }
+        try {
+            String siteName = siteConfigRepository.findByConfigKey("site_name")
+                    .map(c -> c.getConfigValue())
+                    .orElse("简易发卡");
+
+            // 实际发送与失败处理都在 MailDispatcher：这里只负责内容
+            mailDispatcher.send(com.simplecard.service.mail.MailMessage.builder()
+                    .to(toEmail)
+                    .subject("【" + siteName + "】订单查询验证码")
+                    .html(buildVerificationHtml(code, ttlMinutes, siteName))
+                    .purpose(com.simplecard.service.mail.MailPurpose.VERIFICATION)
+                    .build());
+        } catch (Exception e) {
+            // 不打印验证码本身，避免日志成为获取凭证的旁路
+            log.error("Failed to prepare verification code mail to {}: {}", maskEmail(toEmail), e.getMessage());
+        }
+    }
+
+    private String buildVerificationHtml(String code, int ttlMinutes, String siteName) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<!DOCTYPE html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\">")
+          .append("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1.0\"></head>")
+          .append("<body style=\"margin:0;padding:0;background-color:#f4f4f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;\">")
+          .append("<table role=\"presentation\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background-color:#f4f4f7;padding:24px 0;\">")
+          .append("<tr><td align=\"center\">")
+          .append("<table role=\"presentation\" width=\"600\" cellpadding=\"0\" cellspacing=\"0\" style=\"max-width:600px;width:100%;background-color:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);\">")
+          .append("<tr><td style=\"background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);padding:28px 40px;text-align:center;\">")
+          .append("<h1 style=\"margin:0;color:#ffffff;font-size:22px;font-weight:600;letter-spacing:1px;\">")
+          .append(escapeHtml(siteName)).append("</h1></td></tr>")
+          .append("<tr><td style=\"padding:32px 40px 8px;\">")
+          .append("<h2 style=\"margin:0 0 8px;color:#333333;font-size:18px;font-weight:600;\">订单查询验证码</h2>")
+          .append("<p style=\"margin:0;color:#666666;font-size:14px;line-height:1.6;\">您正在其他设备上查询订单，请在页面中输入以下验证码：</p>")
+          .append("</td></tr>")
+          .append("<tr><td style=\"padding:20px 40px;\">")
+          .append("<div style=\"background-color:#f8f9fa;border:1px solid #e8e8e8;border-radius:6px;padding:20px;text-align:center;\">")
+          .append("<span style=\"font-family:'Courier New',Courier,monospace;font-size:32px;font-weight:700;letter-spacing:8px;color:#333333;\">")
+          .append(escapeHtml(code)).append("</span></div></td></tr>")
+          .append("<tr><td style=\"padding:0 40px 24px;\">")
+          .append("<div style=\"background-color:#fff8e1;border:1px solid #ffe082;border-radius:6px;padding:12px 16px;font-size:13px;color:#f57f17;\">")
+          .append("验证码 ").append(ttlMinutes).append(" 分钟内有效，仅可使用一次。")
+          .append("<br>如非本人操作，请忽略本邮件——您的订单不会因此泄露；建议同时修改邮箱密码。</div></td></tr>")
+          .append("<tr><td style=\"background-color:#f8f9fa;padding:20px 40px;text-align:center;border-top:1px solid #eee;\">")
+          .append("<p style=\"margin:0 0 4px;color:#999;font-size:12px;\">此邮件由系统自动发送，请勿直接回复</p>")
+          .append("<p style=\"margin:0;color:#bbb;font-size:11px;\">&copy; ")
+          .append(java.time.Year.now().getValue()).append(" ").append(escapeHtml(siteName)).append("</p>")
+          .append("</td></tr></table></td></tr></table></body></html>");
+        return sb.toString();
+    }
+
+    /** 日志里只保留域名与首字符，避免邮箱地址在日志中成规模沉淀 */
+    static String maskEmail(String email) {
+        if (email == null || email.isBlank()) return "<empty>";
+        int at = email.indexOf('@');
+        if (at <= 0) return "***";
+        String name = email.substring(0, at);
+        String domain = email.substring(at);
+        return (name.length() <= 1 ? "*" : name.charAt(0) + "***") + domain;
     }
 
     private String buildHtml(Order order, Map<UUID, OrderItem> itemMap,

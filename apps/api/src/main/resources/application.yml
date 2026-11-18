@@ -43,9 +43,17 @@ spring:
     properties:
       mail:
         smtp:
-          auth: true
+          auth: ${MAIL_SMTP_AUTH:true}
+          # 465 端口用隐式 TLS（默认）；587 端口把 MAIL_SSL 设为 false 并开启 MAIL_STARTTLS
           ssl:
-            enable: true
+            enable: ${MAIL_SSL:true}
+          starttls:
+            enable: ${MAIL_STARTTLS:false}
+          # 超时是硬要求：不设时 SMTP 无响应会无限挂起，而发信都跑在 @Async 线程里，
+          # 少量卡死就能占满线程池，连带发货通知一起堵住。
+          connectiontimeout: ${MAIL_CONNECTION_TIMEOUT_MS:5000}
+          timeout: ${MAIL_READ_TIMEOUT_MS:10000}
+          writetimeout: ${MAIL_WRITE_TIMEOUT_MS:10000}
   servlet:
     multipart:
       max-file-size: 10MB
@@ -69,9 +77,66 @@ upload:
   url-prefix: ${UPLOAD_URL_PREFIX:/api/uploads}
 
 # Mail
+# enabled 默认 false：下方 spring.mail.host / password 都是占位符，
+# 默认打开会让每次发信都去连 mail.example.com 并失败。真正可用性由
+# MailAvailability 判定（开关打开 且 主机/口令非占位符）。
 mail:
-  enabled: ${MAIL_ENABLED:true}
+  enabled: ${MAIL_ENABLED:false}
   site-url: ${MAIL_SITE_URL:https://example.com}
+  # 访客订单找回（邮箱验证码）。需 mail.enabled 且 SMTP 已配置才真正开放。
+  verification:
+    enabled: ${MAIL_VERIFICATION_ENABLED:true}
+    code-length: ${MAIL_VERIFICATION_CODE_LENGTH:6}
+    code-ttl-seconds: ${MAIL_VERIFICATION_CODE_TTL:600}
+    resend-interval-seconds: ${MAIL_VERIFICATION_RESEND_INTERVAL:60}
+    max-attempts: ${MAIL_VERIFICATION_MAX_ATTEMPTS:5}
+    grant-ttl-seconds: ${MAIL_VERIFICATION_GRANT_TTL:7200}
+    daily-per-email: ${MAIL_VERIFICATION_DAILY_PER_EMAIL:10}
+    max-grants-per-email: ${MAIL_VERIFICATION_MAX_GRANTS_PER_EMAIL:3}
+    max-grants: ${MAIL_VERIFICATION_MAX_GRANTS:10000}
+    max-orders-per-lookup: ${MAIL_VERIFICATION_MAX_ORDERS:100}
+
+  # ── 发件人分离 ──
+  # 验证码与发货通知用不同地址，隔离信誉：验证码被误标垃圾时不会拖累发货通知。
+  # 留空则回退到通道自身的 from（即 MAIL_USERNAME），旧部署无需改动。
+  from:
+    verification: ${MAIL_FROM_VERIFY:}
+    notification: ${MAIL_FROM_ORDER:}
+    bounce: ${MAIL_FROM_BOUNCE:}
+
+  # ── 重试 ──
+  # 验证码有效期只有几分钟，重试窗口必须远小于它，否则重试成功时用户已放弃。
+  retry:
+    max-attempts: ${MAIL_RETRY_MAX_ATTEMPTS:3}
+    backoff-ms: ${MAIL_RETRY_BACKOFF_MS:200}
+    max-backoff-ms: ${MAIL_RETRY_MAX_BACKOFF_MS:1000}
+
+  # ── 多通道路由 ──
+  # 按收件域选择发信通道。国内域（QQ/163）用国内服务商，海外域用海外服务商，
+  # 各自维护信誉，避免一边的投诉率拖累另一边。
+  #
+  # 留空 = 不使用多通道，退化为上方 spring.mail.* 单通道，行为与改造前一致。
+  # 配置示例（两项都填后自动生效）：
+  #   channels:
+  #     domestic:
+  #       host: smtp.qcloudmail.com
+  #       port: 465
+  #       username: noreply@mail.your-domain.com
+  #       password: ${MAIL_DOMESTIC_PASSWORD}
+  #       from: verify@mail.your-domain.com
+  #       domains: [qq.com, foxmail.com, 163.com, 126.com, sina.com, sohu.com]
+  #     overseas:
+  #       host: email-smtp.us-east-1.amazonaws.com
+  #       port: 587
+  #       starttls: true
+  #       ssl: false
+  #       username: ${MAIL_OVERSEAS_USERNAME}
+  #       password: ${MAIL_OVERSEAS_PASSWORD}
+  #       from: verify@mail.your-domain.com
+  #       domains: []          # 空 = 兜底通道，承接未被上面命中的所有域
+  #
+  # 兜底通道也可以显式指定：default-channel: overseas
+  channels: {}
 
 # 受信代理 IP（Nginx / Docker 网桥），用于正确解析真实客户端 IP
 # 影响：限流（按真实 IP 限流）、Webhook 日志（记录真实回调来源 IP）
@@ -86,9 +151,11 @@ turnstile:
   site-key: ${TURNSTILE_SITE_KEY:}
 
 # Logging
+# 默认 INFO：DEBUG 会把请求体、SQL 参数、回调载荷整批写进日志，既涨量又扩大泄露面
+# （日志常被收集到第三方平台）。排障时用 LOG_LEVEL_APP=DEBUG 临时打开，不必改镜像。
 logging:
   level:
-    com.simplecard: DEBUG
+    com.simplecard: ${LOG_LEVEL_APP:INFO}
     org.springframework.security: WARN
 
 coordination:

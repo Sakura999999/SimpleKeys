@@ -17,11 +17,13 @@ public class RedisCoordinationAspect {
     private final UnmatchedTransactionRepository reviews;
     @Around("execution(* com.simplecard.service.impl.OrderServiceImpl.createDirectOrder(..)) || " +
         "execution(* com.simplecard.service.impl.OrderServiceImpl.createCartOrder(..)) || " +
-        "execution(* com.simplecard.controller.AdminTxidReviewController.approveTxidReview(..)) || " +
+        "execution(* com.simplecard.service.TxidReviewService.approve(..)) || " +
         "execution(* com.simplecard.service.InventoryLifecycleService.reserve(..)) || " +
         "execution(* com.simplecard.service.InventoryLifecycleService.confirmPayment(..)) || " +
         "execution(* com.simplecard.service.InventoryLifecycleService.close(..)) || " +
+        "execution(* com.simplecard.service.InventoryLifecycleService.cancel(..)) || " +
         "execution(* com.simplecard.service.InventoryLifecycleService.recordRefund(..)) || " +
+        "execution(* com.simplecard.service.InventoryLifecycleService.requestRefund(..)) || " +
         "execution(* com.simplecard.service.InventoryLifecycleService.retryDelivery(..)) || " +
         "execution(* com.simplecard.service.InventoryLifecycleService.storePaymentDetails(..)) || " +
         "execution(* com.simplecard.service.InventoryLifecycleService.clearPaymentDetails(..))")
@@ -44,7 +46,7 @@ public class RedisCoordinationAspect {
             }
         } else {
             UUID id=args[0] instanceof com.simplecard.entity.Order o?o.getId():(UUID)args[0];
-            if(name.equals("approveTxidReview")) id=reviews.findById(id).map(UnmatchedTransaction::getOrderId).orElse(null);
+            if(name.equals("approve")) id=reviews.findById(id).map(UnmatchedTransaction::getOrderId).orElse(null);
             if(id!=null) {
                 for(var item:items.findByOrderId(id)) keys.add(coordination.stockKey(item.getProductId(),item.getSpecId()));
                 // Initial reservation is inside create-order's already-coordinated transaction.

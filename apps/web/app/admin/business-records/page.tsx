@@ -35,7 +35,7 @@ export default function BusinessRecordsPage() {
   const load = useCallback(async (signal: { active: boolean }) => {
     setLoading(true); setError("")
     try {
-      const result = await adminBusinessApi.list({ page, size: 20, query, bd, received: received === "" ? undefined : received === "true", month })
+      const result = await adminBusinessApi.list({ page: page + 1, size: 20, query, bd, received: received === "" ? undefined : received === "true", month })
       if (signal.active) { setRecords(result.content); setTotal(result.total_elements); setPages(result.total_pages) }
     } catch (e) { if (signal.active) setError(e instanceof Error ? e.message : "加载失败，请检查后端服务") }
     finally { if (signal.active) setLoading(false) }

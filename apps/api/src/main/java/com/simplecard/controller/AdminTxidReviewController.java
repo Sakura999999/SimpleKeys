@@ -3,32 +3,22 @@ package com.simplecard.controller;
 import com.simplecard.annotation.LogOperation;
 import com.simplecard.common.ApiResponse;
 import com.simplecard.common.PageResult;
-import com.simplecard.constant.ErrorCode;
-import com.simplecard.constant.OrderStatus;
-import com.simplecard.context.RequestContext;
-import com.simplecard.entity.Order;
 import com.simplecard.entity.UnmatchedTransaction;
-import com.simplecard.exception.BusinessException;
-import com.simplecard.repository.OrderRepository;
 import com.simplecard.repository.UnmatchedTransactionRepository;
 import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.web.bind.annotation.*;
 
-import java.time.LocalDateTime;
 import java.util.*;
 
-@Slf4j
 @RestController
 @RequestMapping("/admin/txid-reviews")
 @RequiredArgsConstructor
 public class AdminTxidReviewController {
 
     private final UnmatchedTransactionRepository unmatchedTransactionRepository;
-    private final OrderRepository orderRepository;
-    private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
+    private final com.simplecard.service.TxidReviewService reviewService;
 
     @GetMapping
     public ApiResponse<?> listTxidReviews(
@@ -66,62 +56,15 @@ public class AdminTxidReviewController {
 
     @LogOperation(action = "txid.approve", targetType = "TXID_REVIEW", targetId = "#id", detail = "'通过TXID审核'")
     @PostMapping("/{id}/approve")
-    @org.springframework.transaction.annotation.Transactional
     public ApiResponse<Void> approveTxidReview(@PathVariable UUID id) {
-        UnmatchedTransaction ut = unmatchedTransactionRepository.findById(id)
-                .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "审核记录不存在"));
-
-        if (!"PENDING_REVIEW".equals(ut.getStatus())) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "该记录状态不允许审核");
-        }
-
-        // TXID 唯一性前置检查：必须在任何写操作之前，防止检查失败时状态不一致
-        if (ut.getOrderId() != null) {
-            Optional<Order> txidExisting = orderRepository.findByUsdtTxId(ut.getTxid());
-            if (txidExisting.isPresent() && !txidExisting.get().getId().equals(ut.getOrderId())) {
-                throw new BusinessException(ErrorCode.TXID_ALREADY_USED,
-                        "该 TXID 已被订单 " + txidExisting.get().getId() + " 使用，无法审批");
-            }
-        }
-
-        // 更新审核记录
-        ut.setStatus("APPROVED");
-        ut.setVerifyReason("人工审核通过");
-        ut.setReviewerId(RequestContext.getUserId());
-        ut.setReviewedAt(LocalDateTime.now());
-        unmatchedTransactionRepository.save(ut);
-
-        // 更新关联订单状态为 PAID
-        if (ut.getOrderId() != null) {
-            Order order = orderRepository.findById(ut.getOrderId()).orElse(null);
-            if (order != null && (order.getStatus() == OrderStatus.PENDING || order.getStatus() == OrderStatus.EXPIRED)) {
-                inventoryLifecycle.confirmPayment(order.getId(), ut.getTxid());
-                log.info("TXID review approved: order {} marked as PAID", ut.getOrderId());
-            }
-        }
-
+        reviewService.approve(id);
         return ApiResponse.success();
     }
 
     @LogOperation(action = "txid.reject", targetType = "TXID_REVIEW", targetId = "#id", detail = "'拒绝TXID审核'")
     @PostMapping("/{id}/reject")
-    public ApiResponse<Void> rejectTxidReview(@PathVariable UUID id,
-                                               @RequestBody Map<String, String> request) {
-        UnmatchedTransaction ut = unmatchedTransactionRepository.findById(id)
-                .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "审核记录不存在"));
-
-        if (!"PENDING_REVIEW".equals(ut.getStatus())) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "该记录状态不允许审核");
-        }
-
-        String reason = request.getOrDefault("reason", "人工审核拒绝");
-        ut.setStatus("REJECTED");
-        ut.setVerifyReason(reason);
-        ut.setReviewerId(RequestContext.getUserId());
-        ut.setReviewedAt(LocalDateTime.now());
-        unmatchedTransactionRepository.save(ut);
-
-        log.info("TXID review rejected: id={}, reason={}", id, reason);
+    public ApiResponse<Void> rejectTxidReview(@PathVariable UUID id, @RequestBody Map<String,String> request) {
+        reviewService.reject(id, request.getOrDefault("reason","人工审核拒绝"));
         return ApiResponse.success();
     }
 }

@@ -164,7 +164,20 @@ public class EpayServiceImpl implements EpayService {
                 + "&out_trade_no=" + outTradeNo;
 
         try {
-            ResponseEntity<String> response = restTemplate.getForEntity(url, String.class);
+            ResponseEntity<String> response;
+            String host = java.net.URI.create(config.apiUrl()).getHost();
+            boolean ypay = "www.ezfpy.cn".equalsIgnoreCase(host) || "ezfpy.cn".equalsIgnoreCase(host);
+            if (ypay) {
+                // Provider documentation: POST /api/findorder, type=1 uses merchant order ID.
+                MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
+                form.add("order_no", outTradeNo); form.add("type", "1");
+                HttpHeaders headers = new HttpHeaders();
+                headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
+                response = restTemplate.postForEntity(config.apiUrl().replaceAll("/+$", "") + "/api/findorder",
+                        new HttpEntity<>(form, headers), String.class);
+            } else {
+                response = restTemplate.getForEntity(url, String.class);
+            }
             String body = response.getBody();
             if (body == null || body.isBlank()) {
                 log.warn("Epay order query returned empty body: outTradeNo={}", outTradeNo);
@@ -175,10 +188,17 @@ public class EpayServiceImpl implements EpayService {
 
             Map<String, Object> result = objectMapper.readValue(body, new TypeReference<>() {});
 
-            // 网关返回错误码时（如订单不存在），返回 null
-            if (result.containsKey("code") && !Integer.valueOf(1).equals(result.get("code"))) {
-                log.warn("Epay order query error: {}", body);
+            Object rawCode = result.get("code");
+            if (rawCode != null && !"1".equals(rawCode.toString()) && !"200".equals(rawCode.toString())) {
+                log.warn("Epay query rejected: order={}, code={}", outTradeNo, rawCode);
                 return null;
+            }
+            if (ypay) {
+                if (!(result.get("data") instanceof Map<?, ?> data)) return null;
+                result = new LinkedHashMap<>();
+                for (var entry : data.entrySet()) if (entry.getKey() instanceof String k) result.put(k, entry.getValue());
+                Object merchantOrder = result.get("out_trade_no");
+                if (merchantOrder != null && !outTradeNo.equals(merchantOrder.toString())) return null;
             }
 
             String tradeStatus = result.get("status") != null ? result.get("status").toString() : null;
@@ -206,7 +226,9 @@ public class EpayServiceImpl implements EpayService {
     public boolean verifySign(String merchantKey, Map<String, String> params, String sign) {
         if (sign == null || sign.isEmpty()) return false;
         String expected = buildSign(merchantKey, params);
-        return expected.equalsIgnoreCase(sign);
+        // 恒定时间比较：签名是「伪造入账」的唯一门槛，不能留计时侧信道。
+        // 仍保持大小写不敏感，网关回传大写 hex 时必须照旧通过。
+        return com.simplecard.common.Signatures.equalsIgnoreCaseConstantTime(expected, sign);
     }
 
     private String md5(String input) {

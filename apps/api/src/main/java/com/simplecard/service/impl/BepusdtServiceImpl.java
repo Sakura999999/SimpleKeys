@@ -167,7 +167,8 @@ public class BepusdtServiceImpl implements BepusdtService {
     public boolean verifySign(String apiToken, Map<String, String> params, String signature) {
         if (signature == null || signature.isEmpty()) return false;
         String expected = buildSign(apiToken, params);
-        return expected.equalsIgnoreCase(signature);
+        // 与易支付保持一致：恒定时间比较，同时保留大小写不敏感
+        return com.simplecard.common.Signatures.equalsIgnoreCaseConstantTime(expected, signature);
     }
 
     private String md5(String input) {

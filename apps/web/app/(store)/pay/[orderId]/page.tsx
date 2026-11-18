@@ -47,6 +47,21 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
   const [qrcodeUrl, setQrcodeUrl] = useState<string>("")
   const [payUrlH5, setPayUrlH5] = useState<string>("")
   const [retrying, setRetrying] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+
+  async function cancelOrder() {
+    if (cancelling || !window.confirm(t("order.cancelConfirm"))) return
+    setCancelling(true)
+    try {
+      const result = await orderApi.cancel(orderId)
+      setStatus(result.status)
+      setQrcodeUrl("")
+      setPayUrlH5("")
+      toast.success(t("order.cancelled"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("common.error"))
+    } finally { setCancelling(false) }
+  }
   // 标记是否已经跳转过支付 App（从 sessionStorage 初始化，防止返回后文案错误）
   const [hasRedirected, setHasRedirected] = useState(false)
 
@@ -168,7 +183,7 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
     if (refreshCooldown > 0 || isRefreshing) return
     setIsRefreshing(true)
     try {
-      const result = await orderApi.getStatus(orderId)
+      const result = await orderApi.refreshStatus(orderId)
       setPaymentProcessing(Boolean(result.payment_processing))
       if (result.status !== "PENDING") {
         setStatus(result.status)
@@ -176,12 +191,12 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
           refreshCart()
         }
       }
-    } catch {
-      // silent
+      toast.info(t("payment.statusRefreshed"))
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("common.error"))
     } finally {
       setIsRefreshing(false)
       setRefreshCooldown(MANUAL_REFRESH_COOLDOWN)
-      toast.info(t("payment.statusRefreshed"))
     }
   }, [refreshCooldown, isRefreshing, orderId, t])
 
@@ -283,14 +298,14 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
   }
 
   // Expired state
-  if (status === "EXPIRED") {
+  if (status === "EXPIRED" || status === "CANCELLED") {
     return (
       <div className="mx-auto flex max-w-md flex-col items-center py-16">
         <div className="mb-4 rounded-full bg-muted p-4">
           <XCircle className="h-12 w-12 text-muted-foreground" />
         </div>
-        <h1 className="mb-2 text-xl font-bold text-foreground">{t("payment.expired")}</h1>
-        <p className="mb-6 text-sm text-muted-foreground">{t("payment.expiredDesc")}</p>
+        <h1 className="mb-2 text-xl font-bold text-foreground">{t(status === "CANCELLED" ? "status.CANCELLED" : "payment.expired")}</h1>
+        <p className="mb-6 text-sm text-muted-foreground">{t(status === "CANCELLED" ? "order.cancelledDesc" : "payment.expiredDesc")}</p>
         <Link
           href="/"
           className="inline-flex h-10 items-center rounded-lg bg-primary px-5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
@@ -526,6 +541,11 @@ export default function PaymentPage({ params }: { params: Promise<{ orderId: str
           : refreshCooldown > 0
             ? `${refreshCooldown}${t("payment.refreshLimit")}`
             : t("payment.refresh")}
+      </button>
+
+      <button onClick={cancelOrder} disabled={!orderInfoLoaded || cancelling || paymentProcessing}
+        className="text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground disabled:opacity-50">
+        {t("order.cancelOrder")}
       </button>
 
       {/* Help Links */}

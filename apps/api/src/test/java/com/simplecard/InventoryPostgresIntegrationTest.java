@@ -44,7 +44,7 @@ class InventoryPostgresIntegrationTest {
     @Autowired PlatformTransactionManager transactions;
     Product product;
     @BeforeEach void setup() {
-        jdbc.execute("TRUNCATE verified_payment_events,card_keys,order_items,orders,products,payment_channels,users,points_logs,site_configs CASCADE");
+        jdbc.execute("TRUNCATE refund_requests,unmatched_transactions,verified_payment_events,card_keys,order_items,orders,products,payment_channels,users,points_logs,site_configs CASCADE");
         product = product();
         PaymentChannel c = new PaymentChannel(); c.setChannelCode("alipay"); c.setChannelName("Alipay"); channels.save(c);
     }
@@ -125,7 +125,7 @@ class InventoryPostgresIntegrationTest {
         assertThat(cards.findByOrderId(id)).hasSize(1); assertThat(orders.findById(id).orElseThrow().getStatus()).isEqualTo(OrderStatus.DELIVERED);
     }
     @Test void refundIsTerminalEvenWhenPaymentCallbackRepeats() {
-        UUID id=pending(product,1); inventory.confirmPayment(id,null); inventory.recordRefund(id,"refund-test-001");
+        UUID id=pending(product,1); inventory.confirmPayment(id,null); inventory.requestRefund(id,"test refund"); inventory.recordRefund(id,"refund-test-001");
         stock(product); inventory.confirmPayment(id,null);
         assertThat(orders.findById(id).orElseThrow().getStatus()).isEqualTo(OrderStatus.REFUNDED); assertThat(cards.findByOrderId(id)).isEmpty();
         assertThatThrownBy(() -> inventory.retryDelivery(id)).isInstanceOf(BusinessException.class);

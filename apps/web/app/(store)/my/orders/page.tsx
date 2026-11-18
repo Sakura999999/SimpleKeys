@@ -1,19 +1,20 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import { toast } from "sonner"
 import Link from "next/link"
 import { Package, ExternalLink } from "lucide-react"
 import { PaymentIcon, getPaymentLabel } from "@/components/shared/payment-icon"
 import { useLocale } from "@/lib/context"
 import { useRequireAuth } from "@/lib/hooks"
-import { userApi, withMockFallback } from "@/services/api"
+import { orderApi, userApi, withMockFallback } from "@/services/api"
 import { mockOrderList } from "@/lib/mock-data"
 import { OrderStatusBadge } from "@/components/shared/order-status-badge"
 import type { OrderBrief, OrderStatus } from "@/types"
 import type { TranslationKey } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
-const STATUS_FILTERS: (OrderStatus | "ALL")[] = ["ALL", "PENDING", "PAID", "DELIVERED", "EXPIRED", "PAID_REVIEW", "REFUNDED"]
+const STATUS_FILTERS: (OrderStatus | "ALL")[] = ["ALL", "PENDING", "PAID", "DELIVERED", "EXPIRED", "CANCELLED", "PAID_REVIEW", "REFUNDED"]
 
 export default function MyOrdersPage() {
   const { t } = useLocale()
@@ -23,7 +24,22 @@ export default function MyOrdersPage() {
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(1)
   const [total, setTotal] = useState(0)
+  const [cancelling, setCancelling] = useState<string | null>(null)
+  const [revision, setRevision] = useState(0)
   const pageSize = 20
+
+  async function cancelOrder(id: string) {
+    if (cancelling || !window.confirm(t("order.cancelConfirm"))) return
+    setCancelling(id)
+    try {
+      await orderApi.cancel(id)
+      toast.success(t("order.cancelled"))
+      setRevision(v => v + 1)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("common.error"))
+      setRevision(v => v + 1)
+    } finally { setCancelling(null) }
+  }
 
   useEffect(() => {
     if (!user) return
@@ -52,13 +68,14 @@ export default function MyOrdersPage() {
     }
     fetchOrders()
     return () => { cancelled = true }
-  }, [user, statusFilter, page])
+  }, [user, statusFilter, page, revision])
 
   const statusKeys: Record<OrderStatus, TranslationKey> = {
     PENDING: "status.PENDING",
     PAID: "status.PAID",
     DELIVERED: "status.DELIVERED",
     EXPIRED: "status.EXPIRED",
+    CANCELLED: "status.CANCELLED",
     PAID_REVIEW: "status.PAID_REVIEW",
     REFUNDED: "status.REFUNDED",
   }
@@ -135,7 +152,13 @@ export default function MyOrdersPage() {
                     {"\u00A5"}{order.actual_amount.toFixed(2)}
                   </span>
                 </span>
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
+                  {order.status === "PENDING" && !order.payment_processing && (
+                    <button onClick={() => cancelOrder(order.id)} disabled={cancelling !== null}
+                      className="inline-flex h-8 items-center rounded-md border border-border px-3 text-xs font-medium text-muted-foreground hover:bg-accent disabled:opacity-50">
+                      {t("order.cancelOrder")}
+                    </button>
+                  )}
                   {order.status === "PENDING" && !order.payment_processing && order.payment_method && !order.payment_method.startsWith("usdt_") && (
                     <Link
                       href={`/pay/${order.id}?method=${order.payment_method}`}

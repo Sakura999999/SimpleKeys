@@ -17,6 +17,7 @@ import java.util.*;
 @RequiredArgsConstructor
 public class InventoryLifecycleService {
     private final OrderRepository orderRepository;
+    private final RefundRequestRepository refunds;
     private final VerifiedPaymentEventRepository paymentEvents;
     private final OrderItemRepository orderItemRepository;
     private final CardKeyRepository cardKeyRepository;
@@ -75,13 +76,21 @@ public class InventoryLifecycleService {
     @Transactional(timeout = 15)
     public Order confirmPayment(UUID id, String txid) {
         Order order = locked(id);
-        if (order.getStatus() == OrderStatus.REFUNDED || order.getStatus() == OrderStatus.DELIVERED) return order;
+        // A verified payment receipt may complete while a manual refund is in progress.
+        // Preserve the receipt, but never allocate or deliver after the refund hold.
+        if (order.getStatus() == OrderStatus.REFUNDED || order.getStatus() == OrderStatus.DELIVERED
+                || refunds.existsByOrderId(id)) return order;
         if (txid != null) {
             if (order.getUsdtTxId() != null && !txid.equals(order.getUsdtTxId()))
                 throw new BusinessException(ErrorCode.TXID_ALREADY_USED, "订单已关联其他交易");
             order.setUsdtTxId(txid);
         }
         if (order.getPaidAt() == null) order.setPaidAt(LocalDateTime.now());
+        if (order.getStatus() == OrderStatus.CANCELLED) {
+            order.setStatus(OrderStatus.PAID_REVIEW);
+            order.setPaymentReviewReason("订单取消后收到付款，请人工核对并安排发货或退款");
+            return orderRepository.saveAndFlush(order);
+        }
         if (!allocate(order)) {
             order.setStatus(OrderStatus.PAID_REVIEW);
             order.setPaymentReviewReason("已核验付款，库存不足或预占异常，等待补货或人工退款");
@@ -111,6 +120,19 @@ public class InventoryLifecycleService {
         order.setStatus(OrderStatus.EXPIRED); orderRepository.save(order);
     }
 
+    /** Cancellation and payment confirmation serialize on the same order/stock locks. */
+    @Transactional(timeout = 15)
+    public void cancel(UUID id) {
+        Order order = locked(id);
+        if (order.getStatus() == OrderStatus.CANCELLED) return;
+        if (order.getStatus() != OrderStatus.PENDING || order.getPaidAt() != null
+                || paymentEvents.existsByOrderIdAndProcessedFalse(id))
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "订单已付款、正在确认付款或已关闭，不能取消，请查询订单");
+        release(order);
+        order.setStatus(OrderStatus.CANCELLED);
+        orderRepository.saveAndFlush(order);
+    }
+
     private void release(Order order) {
         for (CardKey key : cardKeyRepository.lockByOrderId(order.getId())) {
             if (key.getStatus() == CardKeyStatus.LOCKED) {
@@ -121,20 +143,70 @@ public class InventoryLifecycleService {
     }
 
     @Transactional(timeout = 15)
-    public void recordRefund(UUID id, String reference) {
-        if (reference == null || reference.isBlank() || reference.length() > 250)
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "请填写退款凭证（最多250字）");
+    public RefundRequest requestRefund(UUID id, String reason) {
+        if (reason == null || reason.isBlank() || reason.trim().length() > 500)
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "请填写退款原因（最多500字）");
         Order order = locked(id);
-        if (order.getStatus() == OrderStatus.REFUNDED) return;
+        if (order.getStatus() != OrderStatus.PAID_REVIEW || order.getPaidAt() == null)
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "仅已付款待处理订单可申请退款");
+        var existing = refunds.findByOrderId(id);
+        if (existing.isPresent()) return existing.get();
+        if (order.getActualAmount() == null || order.getActualAmount().signum() <= 0)
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "订单退款金额无效，请人工核查");
+        RefundRequest request = new RefundRequest();
+        request.setOrderId(id); request.setStatus(RefundStatus.PROCESSING);
+        request.setAmount(order.getActualAmount());
+        request.setCurrency(order.getSettlementCurrency() == null ? "CNY" : order.getSettlementCurrency());
+        request.setPaymentAmount(order.getPaymentAmount()); request.setPaymentCurrency(order.getPaymentCurrency());
+        request.setPaymentMethod(Objects.toString(order.getPaymentMethod(),"legacy_unknown")); request.setReason(reason.trim());
+        request.setRequestedBy(com.simplecard.context.RequestContext.getUserId());
+        // Keep reservations until the external refund has been confirmed.
+        return refunds.saveAndFlush(request);
+    }
+
+    @Transactional(timeout = 15)
+    public void recordRefund(UUID id, String reference) {
+        if (reference == null || reference.isBlank() || reference.trim().length() > 250)
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "请填写退款凭证（最多250字）");
+        reference = reference.trim();
+        Order order = locked(id);
+        if (order.getStatus() == OrderStatus.REFUNDED) {
+            if (!reference.equals(order.getRefundReference()))
+                throw new BusinessException(ErrorCode.BAD_REQUEST, "订单已退款，凭证与原记录不一致");
+            return;
+        }
         if (order.getStatus() != OrderStatus.PAID_REVIEW)
             throw new BusinessException(ErrorCode.BAD_REQUEST, "仅已付款待处理订单可登记退款");
+        RefundRequest request = refunds.findByOrderId(id).orElseThrow(() ->
+                new BusinessException(ErrorCode.BAD_REQUEST, "请先申请退款占位，再进行外部退款"));
+        if (request.getStatus() != RefundStatus.PROCESSING)
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "退款申请状态不允许确认");
+        request.setStatus(RefundStatus.SUCCEEDED); request.setReference(reference);
+        request.setConfirmedAt(LocalDateTime.now());
+        request.setConfirmedBy(com.simplecard.context.RequestContext.getUserId());
+        try { refunds.saveAndFlush(request); }
+        catch (org.springframework.dao.DataIntegrityViolationException conflict) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST,"退款凭证冲突，请核查是否已用于同渠道其他订单");
+        }
         release(order); order.setStatus(OrderStatus.REFUNDED); order.setRefundReference(reference);
-        orderRepository.save(order);
+        orderRepository.saveAndFlush(order);
+    }
+
+    /** Called by the review transaction after locking its review record. */
+    @Transactional(timeout = 15)
+    public Order confirmReviewedPayment(UUID id, String txid) {
+        Order order = locked(id);
+        if ((order.getStatus() != OrderStatus.PENDING && order.getStatus() != OrderStatus.EXPIRED && order.getStatus() != OrderStatus.CANCELLED)
+                || refunds.existsByOrderId(id))
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "订单当前状态不允许审批，请核查订单和付款记录");
+        return confirmPayment(id, txid);
     }
 
     @Transactional(timeout = 15)
     public void retryDelivery(UUID id) {
         Order o = locked(id);
+        if (refunds.existsByOrderId(id))
+            throw new BusinessException(ErrorCode.BAD_REQUEST,"退款处理中，禁止重试发货");
         if (o.getStatus() != OrderStatus.PAID_REVIEW && o.getStatus() != OrderStatus.PAID)
             throw new BusinessException(ErrorCode.BAD_REQUEST,"仅已付款待处理订单可重试发货");
         confirmPayment(id, null);

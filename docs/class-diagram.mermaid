@@ -1,0 +1,243 @@
+classDiagram
+    direction LR
+
+    class BaseEntity {
+        <<abstract>>
+        +UUID id
+        +LocalDateTime createdAt
+        +LocalDateTime updatedAt
+    }
+
+    class RefundRequest {
+        +UUID orderId
+        +RefundStatus status
+        +RefundResult result
+        +BigDecimal amount
+        +String currency
+        +String paymentMethod
+        +BigDecimal paymentAmount
+        +String paymentCurrency
+        +String reason
+        +UUID requestedBy
+        +UUID confirmedBy
+        +String reference
+        +LocalDateTime confirmedAt
+        +UUID paymentChannelId
+        +String refundChannelCode
+        +String refundProviderType
+        +String accountKey
+        +String accountLabel
+        +AccountSource accountSource
+        +RefundReferenceType referenceType
+        +String channelRefundNo
+        +BigDecimal refundAmount
+        +String refundCurrency
+        +LocalDateTime refundedAt
+        +String resultReason
+        +LocalDateTime attemptedAt
+        +int reminderCount
+        +LocalDateTime lastRemindedAt
+        +LocalDateTime nextRemindAt
+        +LocalDateTime escalatedAt
+        +LocalDateTime unknownSince
+        +UUID resultUpdatedBy
+    }
+
+    class RefundStatus {
+        <<enumeration>>
+        PROCESSING
+        COMPLETED
+        CANCELLED
+    }
+
+    class RefundResult {
+        <<enumeration>>
+        NOT_STARTED
+        UNKNOWN
+        SUCCEEDED
+        FAILED
+    }
+
+    class RefundReferenceType {
+        <<enumeration>>
+        CHANNEL_NO
+        CHAIN_TXID
+        OFFLINE_MANUAL
+    }
+
+    class AccountSource {
+        <<enumeration>>
+        SNAPSHOT
+        MANUAL
+        LEGACY_UNKNOWN
+    }
+
+    class Order {
+        +UUID userId
+        +String paymentMethod
+        +String settlementCurrency
+        +BigDecimal actualAmount
+        +OrderStatus status
+        +String refundReference
+        +String usdtChain
+        +String usdtWalletAddress
+        +String usdtTxId
+    }
+
+    class PointsLog {
+        +UUID userId
+        +int changeAmount
+        +int balanceAfter
+        +String reason
+        +UUID orderId
+    }
+
+    class PaymentChannel {
+        +String channelCode
+        +String providerType
+        +String configData
+        +boolean enabled
+        +int isDeleted
+    }
+
+    class OperationLog {
+        +UUID userId
+        +String username
+        +String action
+        +String targetType
+        +String targetId
+        +String detail
+        +String ipAddress
+    }
+
+    class ChannelTransaction {
+        +String channelCode
+        +String accountKey
+        +String externalId
+        +String merchantRef
+        +String parentExternalId
+        +ChannelTransactionType type
+        +BigDecimal amount
+        +String currency
+        +BigDecimal fee
+        +LocalDateTime occurredAt
+        +String raw
+    }
+
+    class ReconciliationBatch {
+        +String channelCode
+        +String accountKey
+        +LocalDateTime periodStart
+        +LocalDateTime periodEnd
+        +String fileSha256
+        +int rowCount
+        +String status
+    }
+
+    class ReconciliationItem {
+        +UUID batchId
+        +ReconciliationMatchStatus matchStatus
+        +UUID internalId
+        +UUID channelTxId
+        +BigDecimal diffAmount
+        +int delayedTimes
+        +LocalDateTime suspenseUntil
+    }
+
+    class ReconciliationResolution {
+        +UUID itemId
+        +ReconciliationAction action
+        +UUID operatorId
+        +String reason
+        +String beforeState
+    }
+
+    class InventoryLifecycleService {
+        +requestRefund(UUID, String) RefundRequest
+        +confirmPayment(UUID, String) Order
+        +recordRefund(UUID, String)
+        +reverseRewardPoints(Order)
+        -release(Order)
+        -locked(UUID) Order
+        -awardPoints(Order)
+        +lockRequest(String)
+    }
+
+    class RefundAccountResolver {
+        +resolve(Order, RefundRequest) AccountSnapshot
+        -deriveEpay(Map~String,String~) AccountSnapshot
+        -deriveUsdt(Order) AccountSnapshot
+        -maskWallet(String) String
+    }
+
+    class RefundSettlementService {
+        +request(UUID, String) RefundRequest
+        +confirm(UUID, RefundConfirmCommand) RefundRequest
+        +markUnknown(UUID, String)
+        +markFailed(UUID, String, String)
+        +cancel(UUID, String)
+        +retryRefund(UUID)
+        -assertTransition(RefundRequest, RefundStatus, RefundResult)
+        -resolveByChannelRefundNo(String) RefundRequest
+    }
+
+    class RefundWatchService {
+        +tick()
+        -remind(UUID)
+        -advanceReminderState(RefundRequest) RefundRequest
+    }
+
+    class ReconciliationImportService {
+        +importFile(MultipartFile, String, String, LocalDateTime, LocalDateTime) ReconciliationBatch
+        -normalizeRow(String) ChannelTransaction
+    }
+
+    class ReconciliationMatcher {
+        +match(UUID)
+        -matchByExternalId(ChannelTransaction) ReconciliationItem
+        -matchByMerchantRef(ChannelTransaction) ReconciliationItem
+        -candidates(ChannelTransaction) List~ReconciliationItem~
+        -withinTolerance(BigDecimal, BigDecimal, String) boolean
+    }
+
+    class ReconciliationService {
+        +resolve(UUID, ReconciliationAction, String, UUID)
+        +applyChannelTruth(UUID)
+    }
+
+    BaseEntity <|-- RefundRequest
+    BaseEntity <|-- Order
+    BaseEntity <|-- PointsLog
+    BaseEntity <|-- PaymentChannel
+    BaseEntity <|-- OperationLog
+    BaseEntity <|-- ChannelTransaction
+    BaseEntity <|-- ReconciliationBatch
+    BaseEntity <|-- ReconciliationItem
+    BaseEntity <|-- ReconciliationResolution
+
+    RefundRequest --> RefundStatus : status
+    RefundRequest --> RefundResult : result
+    RefundRequest --> RefundReferenceType : referenceType
+    RefundRequest --> AccountSource : accountSource
+
+    RefundRequest ..> Order : "orderId (无 FK, 逻辑关联)"
+    RefundRequest ..> PaymentChannel : "paymentChannelId (无 FK, 仅快照)"
+    Order "1" --> "0..1" RefundRequest : "uq_refund_order"
+    Order "1" --> "0..*" PointsLog : "orderId"
+
+    ReconciliationItem --> ChannelTransaction : channelTxId
+    ReconciliationItem ..> RefundRequest : "internalId (退款层)"
+    ReconciliationItem ..> Order : "internalId (支付层)"
+    ReconciliationResolution --> ReconciliationItem : itemId
+    ReconciliationBatch "1" --> "0..*" ReconciliationItem : batchId
+    ChannelTransaction ..> ReconciliationBatch : "导入批次"
+
+    RefundSettlementService --> InventoryLifecycleService : 复用 locked/release/冲正
+    RefundSettlementService --> RefundRequest
+    RefundSettlementService --> RefundAccountResolver
+    RefundSettlementService ..> ChannelTransaction : "对账翻案输入"
+    RefundWatchService --> RefundRequest
+    ReconciliationService --> RefundSettlementService : "T7/T9 翻案"
+    ReconciliationMatcher --> ReconciliationItem
+    ReconciliationImportService --> ChannelTransaction
+    ReconciliationImportService --> ReconciliationBatch

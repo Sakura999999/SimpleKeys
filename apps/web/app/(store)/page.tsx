@@ -1,4 +1,5 @@
 import { getProducts, getCategories, getSiteConfig } from "@/services/api-server"
+import { jsonLdProps } from "@/lib/json-ld"
 import { HomeContent } from "./home-content"
 import type { Metadata } from "next"
 
@@ -49,7 +50,7 @@ export default async function HomePage() {
     <>
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        {...jsonLdProps(jsonLd)}
       />
       <HomeContent
         products={productsData.list}

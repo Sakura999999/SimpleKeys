@@ -176,11 +176,31 @@ spring:
     port: ${MAIL_PORT:465}
     username: ${MAIL_USERNAME:your@email.com}
     password: ${MAIL_PASSWORD:your_password}
+    properties:
+      mail:
+        smtp:
+          connectiontimeout: ${MAIL_CONNECTION_TIMEOUT_MS:5000}   # 不要省略：SMTP 卡住会占死异步线程池
+          timeout: ${MAIL_READ_TIMEOUT_MS:10000}
+          writetimeout: ${MAIL_WRITE_TIMEOUT_MS:10000}
 
 mail:
-  enabled: ${MAIL_ENABLED:true}       # 邮件功能总开关，设为 false 可关闭所有邮件发送
+  enabled: ${MAIL_ENABLED:false}      # 邮件功能总开关；默认关闭，填好真实 SMTP 账号后再打开
   site-url: ${MAIL_SITE_URL:https://your-domain.com}
+  verification:                       # 访客订单找回（邮箱验证码）
+    enabled: ${MAIL_VERIFICATION_ENABLED:true}
+    code-ttl-seconds: ${MAIL_VERIFICATION_CODE_TTL:600}
+    resend-interval-seconds: ${MAIL_VERIFICATION_RESEND_INTERVAL:60}
+    max-attempts: ${MAIL_VERIFICATION_MAX_ATTEMPTS:5}
+    grant-ttl-seconds: ${MAIL_VERIFICATION_GRANT_TTL:7200}
 ```
+
+> 只把 `MAIL_ENABLED` 打开、`MAIL_HOST` / `MAIL_PASSWORD` 仍是占位符时，所有邮件功能保持关闭
+> （启动日志会告警）。这是刻意的：否则每次发信都会去连 `mail.example.com` 并失败。
+> 详见 [docs/guest-order-recovery.md](docs/guest-order-recovery.md)。
+
+> **生产环境不要用个人邮箱发信。** QQ/163 个人邮箱有日发信上限且共享 IP 信誉，验证码会有相当比例进垃圾箱。
+> 应使用事务性邮件服务 + 自有域名并配置 SPF/DKIM/DMARC，国内与海外收件人分走两条通道。
+> 完整选型、DNS 记录与上线清单见 [docs/email-delivery.md](docs/email-delivery.md)。
 
 ### 文件上传
 

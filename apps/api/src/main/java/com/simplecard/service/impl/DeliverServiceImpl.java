@@ -31,10 +31,11 @@ public class DeliverServiceImpl implements DeliverService {
     private final OrderAccessGuard orderAccessGuard;
     private final com.simplecard.service.ApiTrafficLimiter trafficLimiter;
     private final com.simplecard.service.SensitiveExportAudit exportAudit;
+    private final com.simplecard.config.EmailVerificationProperties lookupProps;
 
     @Override
     @SuppressWarnings("unchecked")
-    public List<?> queryOrders(Map<String, Object> request, String callerSessionToken) {
+    public List<?> queryOrders(Map<String, Object> request, String callerSessionToken, String lookupToken) {
         var boundedIds=com.simplecard.service.PublicRequestBounds.strings(request,"order_ids",50,36);
         var boundedEmails=com.simplecard.service.PublicRequestBounds.strings(request,"emails",10,254);
         if (boundedIds.size()+boundedEmails.size()>50) throw com.simplecard.service.PublicRequestBounds.bad();
@@ -48,18 +49,44 @@ public class DeliverServiceImpl implements DeliverService {
                 UUID id = parseOrderId(idStr);
                 if (!seen.add(id)) continue;
                 orderRepository.findById(id).ifPresent(o -> {
-                    orderAccessGuard.assertAccess(o, callerSessionToken);
+                    orderAccessGuard.assertAccess(o, callerSessionToken, lookupToken);
                     orders.add(o);
                 });
             }
         }
 
-        // 按邮箱查询：邮箱不是身份凭证，只作为过滤条件。
-        // 仅返回调用方能证明归属的订单，否则此路径会变成订单号枚举入口（可进而通过
-        // /orders/deliver 取得他人卡密）。跨设备邮箱查单需邮箱验证码，尚未实现。
+        // 邮箱查询有两条互斥路径：
+        //   有凭证 → 返回「该邮箱名下的访客订单」，不再要求同会话
+        //   无凭证 → 维持原状，只返回调用方能证明归属的订单
+        Optional<com.simplecard.service.OrderLookupGrantStore.Grant> grant =
+                orderAccessGuard.resolveGrant(lookupToken);
         List<String> emails = boundedEmails;
-        if (emails != null && !emails.isEmpty()) {
-            List<Order> emailOrders = orderRepository.findAccessibleEmails(emails,com.simplecard.context.RequestContext.getUserId(),
+        if (grant.isPresent()) {
+            String grantEmail = grant.get().email();
+            // 请求里的邮箱必须与已验证邮箱一致。这一条就是「不能修改请求邮箱来查询其他人的
+            // 订单」的落点：换掉 emails 参数只会得到 403，而不是别人的订单列表。
+            for (String candidate : emails) {
+                if (!com.simplecard.common.Emails.sameAddress(candidate, grantEmail)) {
+                    throw new BusinessException(ErrorCode.FORBIDDEN,
+                            "请先验证该邮箱后再查询", org.springframework.http.HttpStatus.FORBIDDEN);
+                }
+            }
+            // emails 为空时用凭证邮箱兜底，方便「带着凭证直接查」的客户端
+            List<Order> guestOrders = orderRepository.findGuestOrdersByEmail(grantEmail,
+                    org.springframework.data.domain.PageRequest.of(0, lookupProps.getMaxOrdersPerLookup(),
+                            org.springframework.data.domain.Sort.by("createdAt").descending()));
+            for (Order o : guestOrders) {
+                if (!seen.add(o.getId())) continue;
+                orders.add(o);
+            }
+        } else if (emails != null && !emails.isEmpty()) {
+            // 邮箱不是身份凭证，只作为过滤条件。
+            // 仅返回调用方能证明归属的订单，否则此路径会变成订单号枚举入口（可进而通过
+            // /orders/deliver 取得他人卡密）。
+            // 传入前统一归一化为小写：查询用 lower(o.email) in :emails，不归一化则大小写不同就漏单。
+            List<Order> emailOrders = orderRepository.findAccessibleEmails(
+                    com.simplecard.common.Emails.normalizeAll(emails),
+                    com.simplecard.context.RequestContext.getUserId(),
                     callerSessionToken,orderAccessGuard.isAdmin(),org.springframework.data.domain.PageRequest.of(0,100,
                     org.springframework.data.domain.Sort.by("createdAt").descending()));
             for (Order o : emailOrders) {
@@ -124,7 +151,7 @@ public class DeliverServiceImpl implements DeliverService {
     @Override
     @SuppressWarnings("unchecked")
     @Transactional
-    public List<?> deliverOrders(Map<String, Object> request, String callerSessionToken) {
+    public List<?> deliverOrders(Map<String, Object> request, String callerSessionToken, String lookupToken) {
         List<String> orderIdStrs = com.simplecard.service.PublicRequestBounds.strings(request,"order_ids",50,36);
         if (orderIdStrs == null || orderIdStrs.isEmpty()) {
             throw new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在");
@@ -133,7 +160,7 @@ public class DeliverServiceImpl implements DeliverService {
         List<Map<String, Object>> results = new ArrayList<>();
         for (String idStr : orderIdStrs) {
             UUID orderId = parseOrderId(idStr);
-            results.add(deliverSingleOrder(orderId, callerSessionToken));
+            results.add(deliverSingleOrder(orderId, callerSessionToken, lookupToken));
         }
         return results;
     }
@@ -151,13 +178,14 @@ public class DeliverServiceImpl implements DeliverService {
         }
     }
 
-    private Map<String, Object> deliverSingleOrder(UUID orderId, String callerSessionToken) {
+    private Map<String, Object> deliverSingleOrder(UUID orderId, String callerSessionToken, String lookupToken) {
         // Read only the cards assigned by the confirmed-payment transaction.
         Order order = orderRepository.findByIdForUpdate(orderId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在"));
 
-        // 授权校验 — 此端点会返回卡密明文，注册账号的订单必须由本人访问
-        orderAccessGuard.assertAccess(order, callerSessionToken);
+        // 授权校验 — 此端点会返回卡密明文。注册账号的订单必须由本人访问；
+        // 邮箱验证凭证只对「该邮箱名下的访客订单」有效。
+        orderAccessGuard.assertAccess(order, callerSessionToken, lookupToken);
 
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("order_id", orderId);
@@ -169,12 +197,12 @@ public class DeliverServiceImpl implements DeliverService {
     }
 
     @Override
-    public String exportCardKeys(UUID orderId, String callerSessionToken) {
+    public String exportCardKeys(UUID orderId, String callerSessionToken, String lookupToken) {
         Order order = orderRepository.findById(orderId)
                 .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND, "订单不存在"));
 
         // 授权校验 — 此端点直接下载卡密全文，此前完全没有归属检查
-        orderAccessGuard.assertAccess(order, callerSessionToken);
+        orderAccessGuard.assertAccess(order, callerSessionToken, lookupToken);
         trafficLimiter.order("export",orderId,false);
 
         if (order.getStatus() != OrderStatus.DELIVERED) {

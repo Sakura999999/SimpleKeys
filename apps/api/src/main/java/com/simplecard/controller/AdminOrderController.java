@@ -47,6 +47,12 @@ public class AdminOrderController {
         return ApiResponse.success();
     }
 
+    @LogOperation(action = "order.refund_request", targetType = "ORDER", targetId = "#id", detail = "'申请人工退款并禁止发货'")
+    @PostMapping("/{id}/refund-request")
+    public ApiResponse<?> requestRefund(@PathVariable UUID id, @RequestBody java.util.Map<String,String> body) {
+        return ApiResponse.success(inventoryLifecycle.requestRefund(id,body.get("reason")));
+    }
+
     @LogOperation(action = "order.refund_record", targetType = "ORDER", targetId = "#id", detail = "'登记人工退款'")
     @PostMapping("/{id}/refund-record")
     public ApiResponse<Void> refund(@PathVariable UUID id, @RequestBody java.util.Map<String,String> body) {

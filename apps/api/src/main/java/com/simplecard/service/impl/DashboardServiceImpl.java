@@ -2,7 +2,6 @@ package com.simplecard.service.impl;
 
 import com.simplecard.constant.CardKeyStatus;
 import com.simplecard.constant.OrderStatus;
-import com.simplecard.entity.Order;
 import com.simplecard.entity.Product;
 import com.simplecard.entity.VisitStats;
 import com.simplecard.repository.*;
@@ -42,13 +41,16 @@ public class DashboardServiceImpl implements DashboardService {
         // 电商标准转化率 = 今日成交订单数 / 今日 UV × 100%
         double conversionRate = todayUv > 0 ? (double) todayOrders / todayUv * 100 : 0;
 
-        // Low stock products — count ALL available keys per product (across all specs)
-        List<Product> products = productRepository.findAll().stream()
-                .filter(p -> p.getIsDeleted() == 0 && p.isEnabled())
-                .toList();
+        // Low stock products — 库存用一次分组查询取回，避免逐商品 count（1000 商品 = 1001 次往返）。
+        // 分组查询只返回"有卡密"的商品，因此缺省值必须是 0：零库存商品恰恰最该出现在看板上。
+        List<Product> products = productRepository.findActiveProducts();
+        Map<UUID, Long> availableByProduct = new HashMap<>();
+        for (Object[] row : cardKeyRepository.countGroupByProductAndStatus(CardKeyStatus.AVAILABLE)) {
+            availableByProduct.put((UUID) row[0], ((Number) row[1]).longValue());
+        }
         List<Map<String, Object>> lowStock = new ArrayList<>();
         for (Product p : products) {
-            long available = cardKeyRepository.countByProductIdAndStatus(p.getId(), CardKeyStatus.AVAILABLE);
+            long available = availableByProduct.getOrDefault(p.getId(), 0L);
             if (available <= p.getLowStockThreshold()) {
                 Map<String, Object> m = new LinkedHashMap<>();
                 m.put("product_id", p.getId());
@@ -73,29 +75,38 @@ public class DashboardServiceImpl implements DashboardService {
 
     @Override
     public List<?> getSalesTrend(String period, String startDate, String endDate) {
-        LocalDate start = startDate != null ? LocalDate.parse(startDate) : LocalDate.now().minusDays(30);
-        LocalDate end = endDate != null ? LocalDate.parse(endDate) : LocalDate.now();
+        LocalDate start;
+        LocalDate end;
+        try {
+            start = startDate != null ? LocalDate.parse(startDate) : LocalDate.now().minusDays(30);
+            end = endDate != null ? LocalDate.parse(endDate) : LocalDate.now();
+        } catch (java.time.format.DateTimeParseException e) {
+            // 日期格式错误属于入参问题，应该是 400 而不是让 DateTimeParseException 冒成 500
+            throw new com.simplecard.exception.BusinessException(
+                    com.simplecard.constant.ErrorCode.BAD_REQUEST, "日期格式应为 yyyy-MM-dd");
+        }
 
-        // Still load filtered orders for trend grouping, but with date range filter
         LocalDateTime startDt = start.atStartOfDay();
         LocalDateTime endDt = end.plusDays(1).atStartOfDay();
 
-        List<Order> orders = orderRepository.findAll().stream()
-                .filter(o -> (o.getStatus() == OrderStatus.PAID_REVIEW || o.getStatus() == OrderStatus.PAID || o.getStatus() == OrderStatus.DELIVERED) && o.getPaidAt() != null)
-                .filter(o -> !o.getPaidAt().isBefore(startDt) && o.getPaidAt().isBefore(endDt))
-                .toList();
+        // 只取「时间 + 金额」两列，且由数据库做区间过滤。
+        // 改造前是 findAll() + 内存过滤，成本与整张订单表成正比（10 万单 ≈ 92 MB 堆）。
+        List<Object[]> rows = orderRepository.findPaidAtAndAmountBetween(PAID_STATUSES, startDt, endDt);
 
         Map<String, BigDecimal> salesMap = new TreeMap<>();
         Map<String, Integer> countMap = new TreeMap<>();
 
-        for (Order o : orders) {
+        for (Object[] row : rows) {
+            LocalDateTime paidAt = (LocalDateTime) row[0];
+            BigDecimal amount = (BigDecimal) row[1];
+            if (paidAt == null) continue;
             String key;
             if ("monthly".equals(period)) {
-                key = o.getPaidAt().toLocalDate().withDayOfMonth(1).toString().substring(0, 7);
+                key = paidAt.toLocalDate().withDayOfMonth(1).toString().substring(0, 7);
             } else {
-                key = o.getPaidAt().toLocalDate().toString();
+                key = paidAt.toLocalDate().toString();
             }
-            salesMap.merge(key, o.getActualAmount() != null ? o.getActualAmount() : BigDecimal.ZERO, BigDecimal::add);
+            salesMap.merge(key, amount != null ? amount : BigDecimal.ZERO, BigDecimal::add);
             countMap.merge(key, 1, Integer::sum);
         }
 
@@ -107,4 +118,8 @@ public class DashboardServiceImpl implements DashboardService {
             return m;
         }).collect(Collectors.toList());
     }
+
+    /** 计入销售额的状态：审核中、已支付、已发货。与 sumSalesSince 的口径保持一致 */
+    private static final List<OrderStatus> PAID_STATUSES =
+            List.of(OrderStatus.PAID_REVIEW, OrderStatus.PAID, OrderStatus.DELIVERED);
 }

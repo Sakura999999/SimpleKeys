@@ -64,8 +64,11 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/orders/from-cart").permitAll()
                         .requestMatchers(HttpMethod.POST, "/orders/*/refresh").permitAll()
                         .requestMatchers(HttpMethod.POST, "/orders/*/txid-verify").permitAll()
-                        .requestMatchers(HttpMethod.POST, "/orders/*/repay").permitAll()
+                        .requestMatchers(HttpMethod.POST, "/orders/*/repay", "/orders/*/cancel").permitAll()
                         .requestMatchers("/payments/webhook/**").permitAll()
+                        // 访客订单找回：验证码发送/校验本身必须匿名可调用。
+                        // 它签发的凭证只对「该邮箱名下的访客订单」有效，不放宽任何登录态接口。
+                        .requestMatchers("/order-lookup/**").permitAll()
                         .requestMatchers("/cart/**").permitAll()
                         .requestMatchers("/uploads/**").permitAll()
                         .requestMatchers(HttpMethod.POST, "/visit/track").permitAll()

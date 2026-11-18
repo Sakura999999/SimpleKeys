@@ -6,6 +6,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestTemplate;
 import org.springframework.web.servlet.config.annotation.CorsRegistry;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
@@ -23,6 +24,12 @@ public class WebMvcConfig implements WebMvcConfigurer {
     @Value("${cors.allowed-origins:http://localhost:3000,http://localhost:3001}")
     private String corsAllowedOrigins;
 
+    private final PageBoundsInterceptor pageBoundsInterceptor;
+
+    public WebMvcConfig(PageBoundsInterceptor pageBoundsInterceptor) {
+        this.pageBoundsInterceptor = pageBoundsInterceptor;
+    }
+
     @Bean
     public RestTemplate restTemplate() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -31,6 +38,22 @@ public class WebMvcConfig implements WebMvcConfigurer {
         return new RestTemplate(factory);
     }
 
+    /**
+     * 分页参数闸门。放在拦截器里而不是各 controller，新接口自动被覆盖。
+     */
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(pageBoundsInterceptor).addPathPatterns("/**");
+    }
+
+    /**
+     * 允许的自定义请求头必须与实际发送的一致，否则跨域部署时预检直接失败。
+     *
+     * <p>此前只放行 {@code X-Session-Token}，而前端实际还会发
+     * {@code X-Device-Id}、{@code X-Turnstile-Token}、{@code X-Order-Lookup-Token}。
+     * 开发环境经 Next 的 rewrites 同源转发看不出来，一旦前后端分域（api.example.com）
+     * 就会表现为"所有请求 403/CORS 报错"。
+     */
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         String[] origins = Arrays.stream(corsAllowedOrigins.split(","))
@@ -43,7 +66,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
             registry.addMapping("/**")
                     .allowedOriginPatterns("*")
                     .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
-                    .allowedHeaders("Content-Type", "Authorization", "X-Session-Token")
+                    .allowedHeaders(ALLOWED_HEADERS)
                     .exposedHeaders("X-Session-Token")
                     .allowCredentials(false)
                     .maxAge(3600);
@@ -51,12 +74,21 @@ public class WebMvcConfig implements WebMvcConfigurer {
             registry.addMapping("/**")
                     .allowedOrigins(origins)
                     .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
-                    .allowedHeaders("Content-Type", "Authorization", "X-Session-Token")
+                    .allowedHeaders(ALLOWED_HEADERS)
                     .exposedHeaders("X-Session-Token")
                     .allowCredentials(true)
                     .maxAge(3600);
         }
     }
+
+    private static final String[] ALLOWED_HEADERS = {
+            "Content-Type",
+            "Authorization",
+            "X-Session-Token",
+            "X-Device-Id",
+            "X-Turnstile-Token",
+            "X-Order-Lookup-Token"
+    };
 
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {

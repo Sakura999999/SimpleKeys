@@ -19,11 +19,36 @@ import java.util.UUID;
 
 public interface OrderRepository extends JpaRepository<Order, UUID> {
 
-    @Query("select o from Order o where o.email in :emails and (:admin=true or " +
+    /**
+     * 按邮箱列表 + 归属条件查订单（带会话兜底）。
+     *
+     * <p>邮箱比较用 {@code lower(...) in :emails}，调用方需传入已归一化的小写列表
+     * （见 {@link com.simplecard.common.Emails#normalizeAll}）。此前用大小写敏感的
+     * {@code in}，与访客查单路径的 {@code lower(=)} 语义不一致，导致混合大小写的历史数据漏单。
+     */
+    @Query("select o from Order o where lower(o.email) in :emails and (:admin=true or " +
             "(:userId is not null and o.userId=:userId) or (o.userId is null and :token is not null and o.sessionToken=:token))")
     List<Order> findAccessibleEmails(@Param("emails") java.util.Collection<String> emails,@Param("userId") UUID userId,
             @Param("token") String token,@Param("admin") boolean admin,org.springframework.data.domain.Pageable pageable);
     List<Order> findByStatusOrderByCreatedAtAsc(OrderStatus status);
+
+    /**
+     * 访客订单按邮箱查询 — 供邮箱验证码查单使用。
+     *
+     * <p>只匹配 {@code userId is null}：注册账号的订单必须登录本人查看，
+     * 邮箱验证码不能成为绕过登录的旁路。邮箱比较用 lower() 以免大小写不同漏单。
+     */
+    @Query("select o from Order o where lower(o.email) = lower(:email) and o.userId is null "
+            + "order by o.createdAt desc")
+    List<Order> findGuestOrdersByEmail(@Param("email") String email, Pageable pageable);
+
+    /** 该邮箱名下访客订单数 — 决定是否真的发出验证码邮件 */
+    @Query("select count(o) from Order o where lower(o.email) = lower(:email) and o.userId is null")
+    long countGuestOrdersByEmail(@Param("email") String email);
+
+    /** 该邮箱名下属于注册账号的订单数 — 仅用于「另有 N 笔请登录查看」的提示，不返回内容 */
+    @Query("select count(o) from Order o where lower(o.email) = lower(:email) and o.userId is not null")
+    long countRegisteredOrdersByEmail(@Param("email") String email);
 
     Optional<Order> findByIdempotencyKey(String idempotencyKey);
 
@@ -44,7 +69,14 @@ public interface OrderRepository extends JpaRepository<Order, UUID> {
 
     long countByClientIpAndStatus(String clientIp, OrderStatus status);
 
-    long countByEmailAndStatus(String email, OrderStatus status);
+    /**
+     * 同邮箱待支付订单数（防刷）。
+     *
+     * <p>用 {@code lower(o.email) = lower(:email)} 而不是派生方法的大小写敏感匹配：
+     * 换个大写字母就能绕过"同邮箱最多 N 笔待支付订单"的限制，等于限流形同虚设。
+     */
+    @Query("select count(o) from Order o where lower(o.email) = lower(:email) and o.status = :status")
+    long countByEmailAndStatus(@Param("email") String email, @Param("status") OrderStatus status);
 
     /** 悲观写锁：SELECT ... FOR UPDATE，用于防止并发发货等竞态条件 */
     @Lock(LockModeType.PESSIMISTIC_WRITE)
@@ -63,6 +95,22 @@ public interface OrderRepository extends JpaRepository<Order, UUID> {
 
     @Query("SELECT COUNT(o) FROM Order o WHERE (o.status = com.simplecard.constant.OrderStatus.PAID_REVIEW OR o.status = com.simplecard.constant.OrderStatus.PAID OR o.status = com.simplecard.constant.OrderStatus.DELIVERED)")
     long countTotalPaidOrders();
+
+    /**
+     * 取区间内的成交时间与金额，仅两列，不装载实体。
+     *
+     * <p>销售趋势图只需要「哪一天、多少钱」，此前用 {@code findAll()} 把整张订单表
+     * 连同所有字段读进持久化上下文再内存过滤。10 万订单的基准是 543~697 ms、
+     * 92 MB 堆，而这条查询的代价只与时间区间内的订单数有关。
+     *
+     * <p>返回 {@code Object[]{LocalDateTime paidAt, BigDecimal amount}}。
+     * 用 {@code o.paidAt is not null} 显式排除未支付记录，避免调用方再判空。
+     */
+    @Query("select o.paidAt, o.actualAmount from Order o " +
+            "where o.status in :statuses and o.paidAt is not null and o.paidAt >= :start and o.paidAt < :end")
+    List<Object[]> findPaidAtAndAmountBetween(@Param("statuses") java.util.Collection<OrderStatus> statuses,
+                                              @Param("start") LocalDateTime start,
+                                              @Param("end") LocalDateTime end);
 
     long count();
 

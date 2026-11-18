@@ -263,9 +263,9 @@ public class PaymentServiceImpl implements PaymentService {
         }
 
         trafficLimiter.external("repay-upstream","repay-order",orderId,1);
-        inventoryLifecycle.clearPaymentDetails(orderId);
-
-        // 重新创建支付
+        // Keep existing gateway details: submitting the same out_trade_no again can
+        // be rejected as a duplicate, even when the original payment succeeded.
+        // createPaymentRequest reuses the stored link instead of creating a second payment.
         return createPayment(order.getId(), order.getPaymentMethod(), order.getActualAmount(), device);
     }
 

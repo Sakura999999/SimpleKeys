@@ -26,6 +26,7 @@ import java.util.*;
 public class AdminOrderServiceImpl implements AdminOrderService {
 
     private final OrderRepository orderRepository;
+    private final com.simplecard.repository.RefundRequestRepository refunds;
     private final com.simplecard.service.PaymentInboxService paymentInbox;
     private final com.simplecard.service.InventoryLifecycleService inventoryLifecycle;
     private final OrderItemRepository orderItemRepository;
@@ -77,6 +78,7 @@ public class AdminOrderServiceImpl implements AdminOrderService {
         map.put("status", o.getStatus().name());
         map.put("payment_review_reason", o.getPaymentReviewReason());
         map.put("refund_reference", o.getRefundReference());
+        refunds.findByOrderId(o.getId()).ifPresent(refund -> map.put("refund_request",refund));
         map.put("order_type", o.getOrderType().name());
         map.put("payment_method", o.getPaymentMethod());
         map.put("created_at", o.getCreatedAt());

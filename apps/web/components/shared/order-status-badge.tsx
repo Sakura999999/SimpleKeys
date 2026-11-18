@@ -11,6 +11,7 @@ const statusStyles: Record<OrderStatus, string> = {
   DELIVERED: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400",
   PAID_REVIEW: "bg-orange-100 text-orange-800",
   REFUNDED: "bg-zinc-100 text-zinc-600",
+  CANCELLED: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
   EXPIRED: "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
 }
 
@@ -19,6 +20,7 @@ const statusKeys: Record<OrderStatus, TranslationKey> = {
   PAID: "status.PAID",
   DELIVERED: "status.DELIVERED",
   EXPIRED: "status.EXPIRED",
+    CANCELLED: "status.CANCELLED",
   PAID_REVIEW: "status.PAID_REVIEW",
   REFUNDED: "status.REFUNDED",
 }

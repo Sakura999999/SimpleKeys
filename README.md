@@ -178,11 +178,34 @@ spring:
     port: ${MAIL_PORT:465}
     username: ${MAIL_USERNAME:your@email.com}
     password: ${MAIL_PASSWORD:your_password}
+    properties:
+      mail:
+        smtp:
+          connectiontimeout: ${MAIL_CONNECTION_TIMEOUT_MS:5000}   # never omit: a stalled SMTP call blocks the async pool
+          timeout: ${MAIL_READ_TIMEOUT_MS:10000}
+          writetimeout: ${MAIL_WRITE_TIMEOUT_MS:10000}
 
 mail:
-  enabled: ${MAIL_ENABLED:true}       # Master switch — set false to disable all emails
+  enabled: ${MAIL_ENABLED:false}      # Master switch — defaults to false; enable only after filling in real SMTP credentials
   site-url: ${MAIL_SITE_URL:https://your-domain.com}
+  verification:                       # Guest order recovery by email code
+    enabled: ${MAIL_VERIFICATION_ENABLED:true}
+    code-ttl-seconds: ${MAIL_VERIFICATION_CODE_TTL:600}
+    resend-interval-seconds: ${MAIL_VERIFICATION_RESEND_INTERVAL:60}
+    max-attempts: ${MAIL_VERIFICATION_MAX_ATTEMPTS:5}
+    grant-ttl-seconds: ${MAIL_VERIFICATION_GRANT_TTL:7200}
 ```
+
+> Turning `MAIL_ENABLED` on while `MAIL_HOST` / `MAIL_PASSWORD` are still placeholders
+> keeps every email feature off (the app logs a warning at startup). This is deliberate:
+> otherwise the app would try to reach `mail.example.com` on every send.
+> See [docs/guest-order-recovery.md](docs/guest-order-recovery.md).
+
+> **For production, don't use a personal mailbox.** QQ/163 personal SMTP has daily caps and
+> shares IP reputation, so a large share of verification codes lands in spam. Use a
+> transactional email provider with your own domain plus SPF/DKIM/DMARC, and split domestic
+> and overseas recipients across two channels. Full guide, provider comparison, DNS records
+> and go-live checklist: [docs/email-delivery.md](docs/email-delivery.md).
 
 ### File Uploads
 

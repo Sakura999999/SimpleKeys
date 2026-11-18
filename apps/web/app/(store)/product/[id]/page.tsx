@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation"
 import { Package } from "lucide-react"
 import { getProductDetail, getPaymentChannels } from "@/services/api-server"
+import { jsonLdProps } from "@/lib/json-ld"
 import { ProductActions } from "./product-actions"
 import { ProductBreadcrumb } from "./product-breadcrumb"
 import { ProductDescription } from "./product-description"
@@ -80,11 +81,11 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
     <div className="flex flex-col gap-4">
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
+        {...jsonLdProps(jsonLd)}
       />
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbLd) }}
+        {...jsonLdProps(breadcrumbLd)}
       />
 
       {/* Breadcrumb */}

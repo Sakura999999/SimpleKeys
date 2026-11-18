@@ -3,11 +3,17 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useSearchParams } from "next/navigation"
 import Link from "next/link"
-import { Search, Copy, Download, FileText, CheckCircle2, X, Clock, HelpCircle, ExternalLink, Loader2, AlertCircle, Info } from "lucide-react"
+import { Search, Copy, Download, FileText, CheckCircle2, X, Clock, HelpCircle, ExternalLink, Loader2, AlertCircle, Info, Mail, ShieldCheck } from "lucide-react"
 import { toast } from "sonner"
 import { useLocale, useSiteConfig } from "@/lib/context"
 import type { TranslationKey } from "@/lib/i18n"
-import { orderApi, withMockFallback, getApiErrorMessage } from "@/services/api"
+import {
+  orderApi,
+  withMockFallback,
+  getApiErrorMessage,
+  getLookupGrantFor,
+  saveLookupGrant,
+} from "@/services/api"
 import { mockQueryOrders, mockDeliver } from "@/lib/mock-data"
 import { OrderStatusBadge } from "@/components/shared/order-status-badge"
 import { PaymentIcon, getPaymentLabel } from "@/components/shared/payment-icon"
@@ -19,6 +25,12 @@ interface RecentQuery {
   value: string
   timestamp: number
 }
+
+/**
+ * 邮箱查单需要先验证邮箱归属。这里只表示「当前被拦住了」，
+ * 不放任何订单信息——拦住的理由本身不能泄露邮箱下有没有订单。
+ */
+type EmailGate = { mode: "verify" | "disabled"; email: string }
 
 /** 将后端返回的 TXID 验证错误码转为 i18n 翻译文本 */
 function formatTxidReason(reason: string, t: (key: TranslationKey) => string): string {
@@ -55,6 +67,27 @@ export default function OrderQueryPage() {
   const [txidSubmitting, setTxidSubmitting] = useState(false)
   const [txidResult, setTxidResult] = useState<Record<string, TxidVerifyResult>>({})
 
+  // 邮箱验证（跨设备找回访客订单）
+  const [emailGate, setEmailGate] = useState<EmailGate | null>(null)
+  const [verifyCode, setVerifyCode] = useState("")
+  const [codeSent, setCodeSent] = useState(false)
+  const [sendingCode, setSendingCode] = useState(false)
+  const [verifying, setVerifying] = useState(false)
+  const [resendIn, setResendIn] = useState(0)
+  /** 当前生效的已验证邮箱，用于顶部「已验证」提示 */
+  const [verifiedEmail, setVerifiedEmail] = useState<string | null>(null)
+  /** 「另有 N 笔订单属于注册账号」的提示 */
+  const [registeredNotice, setRegisteredNotice] = useState<string | null>(null)
+
+  const emailVerificationEnabled = config?.email_verification_enabled === true
+
+  // 重发验证码倒计时
+  useEffect(() => {
+    if (resendIn <= 0) return
+    const timer = setTimeout(() => setResendIn(v => Math.max(0, v - 1)), 1000)
+    return () => clearTimeout(timer)
+  }, [resendIn])
+
   // Load recent queries + handle URL params on mount
   useEffect(() => {
     if (initRef.current) return
@@ -85,19 +118,43 @@ export default function OrderQueryPage() {
       return
     }
 
+    const isEmail = trimmed.includes("@")
+    const lookupEmail = isEmail ? trimmed.toLowerCase() : ""
+    // 邮箱查询前的两道门。订单号查询完全不受影响——沿用「订单号即凭证」的既有行为。
+    // config 尚未加载时不拦（此时后端没有凭证只会返回同会话订单，不会多给任何东西）。
+    if (isEmail && config) {
+      if (!emailVerificationEnabled) {
+        setOrders([])
+        setDeliverResults([])
+        setSearched(true)
+        setEmailGate({ mode: "disabled", email: lookupEmail })
+        return
+      }
+      if (!getLookupGrantFor(lookupEmail)) {
+        setOrders([])
+        setDeliverResults([])
+        setSearched(false)
+        setEmailGate({ mode: "verify", email: lookupEmail })
+        setVerifyCode("")
+        setCodeSent(false)
+        setResendIn(0)
+        return
+      }
+    }
+    setEmailGate(null)
+
     setIsSearching(true)
     setOrders([])
     setDeliverResults([])
 
     try {
-      // Determine if input is email or order ID
-      const isEmail = trimmed.includes("@")
+      const lookupToken = isEmail ? getLookupGrantFor(lookupEmail)?.token : undefined
       const queryParams = isEmail
-        ? { emails: [trimmed] }
+        ? { emails: [lookupEmail] }
         : { order_ids: [trimmed] }
 
       const found = await withMockFallback(
-        () => orderApi.query(queryParams),
+        () => orderApi.query(queryParams, lookupToken ? { lookupToken } : undefined),
         () => mockQueryOrders(queryParams)
       )
 
@@ -107,7 +164,7 @@ export default function OrderQueryPage() {
       const deliverableIds = found.filter(o => o.status === "PAID" || o.status === "DELIVERED").map(o => o.id)
       if (deliverableIds.length > 0) {
         finalDeliver = await withMockFallback(
-          () => orderApi.deliver({ order_ids: deliverableIds }),
+          () => orderApi.deliver({ order_ids: deliverableIds }, lookupToken ? { lookupToken } : undefined),
           () => mockDeliver(deliverableIds)
         )
         // deliver 可能将 PAID 变为 DELIVERED，同步更新状态
@@ -145,7 +202,7 @@ export default function OrderQueryPage() {
       setSearched(true)
       setIsSearching(false)
     }
-  }, [t])
+  }, [t, config, emailVerificationEnabled])
 
   const handleSearch = useCallback((value?: string) => {
     doSearch(value || queryValue)
@@ -172,6 +229,56 @@ export default function OrderQueryPage() {
   const quickQuery = (value: string) => {
     setQueryValue(value)
     doSearch(value)
+  }
+
+  // ── 邮箱验证流程 ──
+
+  const sendLookupCode = async () => {
+    if (!emailGate || emailGate.mode !== "verify" || sendingCode || resendIn > 0) return
+    setSendingCode(true)
+    try {
+      const result = await orderApi.sendLookupCode(emailGate.email)
+      setCodeSent(true)
+      setResendIn(result.retry_after > 0 ? result.retry_after : 60)
+      // 文案用「如果存在可找回的订单」：该邮箱有无订单不能对外区分
+      toast.success(t("order.verify.codeSent"))
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, t))
+    } finally {
+      setSendingCode(false)
+    }
+  }
+
+  const submitLookupCode = async () => {
+    if (!emailGate || emailGate.mode !== "verify" || verifying) return
+    const code = verifyCode.trim()
+    if (!/^\d{6}$/.test(code)) {
+      toast.error(t("order.verify.codeFormat"))
+      return
+    }
+    setVerifying(true)
+    try {
+      const result = await orderApi.verifyLookupCode(emailGate.email, code)
+      saveLookupGrant({ token: result.token, email: emailGate.email, expiresAt: result.expires_at })
+      setVerifiedEmail(emailGate.email)
+      setRegisteredNotice(
+        result.registered_orders > 0
+          ? t("order.verify.registeredNotice").replace("{n}", String(result.registered_orders))
+          : null
+      )
+      const email = emailGate.email
+      setEmailGate(null)
+      setVerifyCode("")
+      setCodeSent(false)
+      setResendIn(0)
+      toast.success(t("order.verify.success"))
+      // 凭证已写入 sessionStorage，这里重新走一次查询即可
+      doSearch(email)
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, t))
+    } finally {
+      setVerifying(false)
+    }
   }
 
   const getDeliverForOrder = (orderId: string) => {
@@ -286,6 +393,85 @@ export default function OrderQueryPage() {
         </div>
       </div>
 
+      {/* 邮箱查单入口关闭时的明确提示 */}
+      {emailGate?.mode === "disabled" && (
+        <div className="flex items-start gap-3 rounded-lg border border-border bg-muted/40 p-4">
+          <Info className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+          <div>
+            <p className="text-sm font-medium text-foreground">{t("order.verify.disabledTitle")}</p>
+            <p className="mt-1 text-sm text-muted-foreground">{t("order.verify.disabledDesc")}</p>
+          </div>
+        </div>
+      )}
+
+      {/* 邮箱验证步骤 */}
+      {emailGate?.mode === "verify" && (
+        <div className="rounded-lg border border-border bg-card p-4">
+          <div className="flex items-start gap-3">
+            <Mail className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-foreground">{t("order.verify.title")}</p>
+              <p className="mt-1 text-sm text-muted-foreground">{t("order.verify.desc")}</p>
+              <p className="mt-2 break-all font-mono text-sm text-foreground">{emailGate.email}</p>
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={sendLookupCode}
+              disabled={sendingCode || resendIn > 0}
+              className="inline-flex h-9 items-center gap-2 rounded-lg border border-border bg-background px-4 text-sm font-medium text-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
+            >
+              {sendingCode ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />}
+              {resendIn > 0
+                ? `${resendIn}s`
+                : codeSent
+                  ? t("order.verify.resend")
+                  : t("order.verify.sendCode")}
+            </button>
+
+            {codeSent && (
+              <>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={verifyCode}
+                  onChange={(e) => setVerifyCode(e.target.value.replace(/\D/g, ""))}
+                  onKeyDown={(e) => e.key === "Enter" && submitLookupCode()}
+                  placeholder={t("order.verify.codePlaceholder")}
+                  className="h-9 w-36 rounded-lg border border-input bg-background px-3 text-center font-mono text-sm tracking-[0.3em] text-foreground placeholder:tracking-normal placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+                />
+                <button
+                  type="button"
+                  onClick={submitLookupCode}
+                  disabled={verifying || verifyCode.length !== 6}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:pointer-events-none disabled:opacity-50"
+                >
+                  {verifying ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+                  {verifying ? t("order.verify.verifying") : t("order.verify.submit")}
+                </button>
+              </>
+            )}
+          </div>
+
+          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{t("order.verify.hint")}</p>
+        </div>
+      )}
+
+      {/* 已验证状态 + 注册订单提示 */}
+      {verifiedEmail && !emailGate && (
+        <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3">
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+          <div className="text-xs leading-relaxed text-muted-foreground">
+            <p>{t("order.verify.verifiedAs").replace("{email}", verifiedEmail)}</p>
+            {registeredNotice && <p className="mt-1 text-foreground">{registeredNotice}</p>}
+          </div>
+        </div>
+      )}
+
       {/* Results — 有查询结果时优先展示在最近订单上方 */}
       {isSearching && (
         <div className="flex items-center justify-center py-12">
@@ -382,7 +568,7 @@ export default function OrderQueryPage() {
 
             {/* USDT 补单区域 — 仅 USDT + PENDING/EXPIRED */}
             {order.payment_method?.startsWith("usdt_") &&
-             (order.status === "PENDING" || order.status === "EXPIRED") && !order.payment_processing && (
+             (order.status === "PENDING" || order.status === "EXPIRED" || order.status === "CANCELLED") && !order.payment_processing && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-950/30">
                 {/* TXID 验证结果反馈（本次会话即时结果优先） */}
                 {txidResult[order.id] ? (

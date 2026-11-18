@@ -30,7 +30,7 @@ public class AdminBusinessRecordController {
         boolean received, LocalDateTime orderedAt, LocalDateTime receivedAt,
         @Size(max=2000) String notes) {}
 
-    @GetMapping public ApiResponse<?> list(@RequestParam(defaultValue="0") int page,
+    @GetMapping public ApiResponse<?> list(@RequestParam(defaultValue="1") int page,
         @RequestParam(defaultValue="20") int size, @RequestParam(required=false) String query,
         @RequestParam(required=false) String bd, @RequestParam(required=false) Boolean received,
         @RequestParam(required=false) String month) {
@@ -46,7 +46,7 @@ public class AdminBusinessRecordController {
             try { ym = YearMonth.parse(month); } catch (RuntimeException ex) { throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"月份格式应为 YYYY-MM"); }
             spec = spec.and((root,q,cb) -> cb.and(cb.greaterThanOrEqualTo(root.get("orderedAt"),ym.atDay(1).atStartOfDay()), cb.lessThan(root.get("orderedAt"),ym.plusMonths(1).atDay(1).atStartOfDay())));
         }
-        return ApiResponse.success(repository.findAll(spec, PageRequest.of(Math.max(page,0), Math.min(Math.max(size,1),100), Sort.by(Sort.Direction.DESC,"createdAt"))));
+        return ApiResponse.success(repository.findAll(spec, PageRequest.of(Math.max(page - 1,0), Math.min(Math.max(size,1),100), Sort.by(Sort.Direction.DESC,"createdAt"))));
     }
     @PostMapping public ApiResponse<BusinessRecord> create(@Valid @RequestBody Input input) { return ApiResponse.success(repository.save(apply(new BusinessRecord(),input))); }
     @PutMapping("/{id}") public ApiResponse<BusinessRecord> update(@PathVariable UUID id, @Valid @RequestBody Input input) {

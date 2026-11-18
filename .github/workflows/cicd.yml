@@ -3,8 +3,11 @@
 # ===================================================================
 #
 # 流程：
-#   push tag v*           → 云端构建两个 Docker 镜像（:v* + :latest）→ 推送 GHCR（仅构建，不部署）
-#   workflow_dispatch     → 云端构建（自定义 tag）→ 推送 GHCR；勾选 deploy 开关时才部署到 demo 服务器
+#   push tag v*           → 先跑测试门禁 → 构建两个 Docker 镜像（:v* + :latest）→ 推送 GHCR（仅构建，不部署）
+#   workflow_dispatch     → 先跑测试门禁 → 云端构建（自定义 tag）→ 推送 GHCR；勾选 deploy 开关时才部署到 demo 服务器
+#
+# 测试门禁（Job 0）会起真实 PostgreSQL 与 4 个 Redis，跑完整 `mvn test`（含集成测试），
+# 外加前端 `tsc --noEmit`。镜像构建用 -DskipTests，因此这里不通过就不产出镜像。
 #
 # 镜像构建方式：
 #   后端 (Java):  Jib Maven 插件直接产出 Docker 镜像（无需 Dockerfile）
@@ -36,9 +39,89 @@ permissions:
 
 jobs:
   # ════════════════════════════════════════════════════════════════
+  # Job 0: 测试门禁（单元测试 + 依赖真实 PostgreSQL / Redis 的集成测试）
+  # ════════════════════════════════════════════════════════════════
+  # 为什么要有这个 job：
+  #   集成测试默认被 *Environments 变量关掉（本地不想每次都起服务），而镜像构建又用
+  #   -DskipTests，结果是"测试写了但从来没在流水线里跑过"。支付回调幂等、库存超卖、
+  #   分布式锁这些最容易出事的地方，恰好只有集成测试覆盖。
+  #
+  # 这里的做法：起真 PG + 4 个 Redis（测试里硬编码了 55439/55440 与 56379~56382），
+  # 打开四个开关变量，跑完整 `mvn test`。
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 55439:5432      # inventory_test（库存/结算/退款）
+          - 55440:5432      # product_guard_test（商品查询保护）
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Java 22
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '22'
+          cache: maven
+
+      # 四个独立 Redis 实例：测试里分别占用 56379(协调锁) / 56380·56381(商品缓存)
+      # / 56382(API 限流)。不能共用一个，因为测试会断言"不同用途不得复用同一实例"。
+      - name: Start Redis instances
+        run: |
+          for port in 56379 56380 56381 56382; do
+            docker run -d --name "redis-$port" -p "$port:6379" redis:7-alpine
+          done
+          # 等端口就绪，避免测试偶发 connection refused
+          for port in 56379 56380 56381 56382; do
+            for i in $(seq 1 30); do
+              if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then break; fi
+              sleep 1
+            done
+          done
+
+      - name: Create test databases
+        run: |
+          for db in inventory_test product_guard_test; do
+            docker exec "${{ job.services.postgres.id }}" psql -U postgres -c "CREATE DATABASE $db"
+          done
+
+      - name: Backend tests (unit + PostgreSQL/Redis integration)
+        working-directory: apps/api
+        env:
+          INVENTORY_PG_TESTS: "true"
+          REDIS_COORDINATION_TESTS: "true"
+          PRODUCT_GUARD_TESTS: "true"
+          API_LIMIT_TESTS: "true"
+          DB_USERNAME: postgres
+          DB_PASSWORD: postgres
+        run: mvn -B test
+
+      # 前端没有测试框架，但 next.config 里开了 ignoreBuildErrors，
+      # 意味着类型错误不会让镜像构建失败 —— 这里补上真正的类型门槛。
+      - name: Frontend type check
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+          pnpm --filter @simplecard/web exec tsc --noEmit
+
+  # ════════════════════════════════════════════════════════════════
   # Job 1: 构建并推送镜像（在 GitHub 云端 runner 上执行）
   # ════════════════════════════════════════════════════════════════
   build-and-push:
+    needs: [test]               # 测试不过不产出镜像；紧急发版可临时注释掉这一行
     runs-on: ubuntu-latest      # 使用 GitHub 提供的云端 Ubuntu 机器
     permissions:
       contents: read

@@ -1,0 +1,109 @@
+%% 第二批：退款确认 · 超时处置 · 资金对账 —— 三条关键时序
+%% 1) 正常确认（T6）
+
+sequenceDiagram
+    autonumber
+    participant A as 管理员(前端)
+    participant C as AdminOrderController
+    participant S as RefundSettlementService
+    participant R as RefundRequestRepository
+    participant I as InventoryLifecycleService
+    participant DB as PostgreSQL
+
+    A->>C: POST /api/admin/orders/{id}/refund-confirm
+    C->>S: confirm(orderId, cmd, operatorId)
+    S->>I: locked(order)
+    I-->>S: order (FOR UPDATE + refresh PESSIMISTIC_WRITE, lock_timeout 5s)
+    S->>R: findByOrderId(orderId)
+    R-->>S: request
+    alt 已是 COMPLETED
+        S->>S: 断言 reference 逐字一致
+        S-->>C: 成功（幂等重放 T11）
+    else 订单非 PAID_REVIEW 且非 REFUNDED
+        S-->>C: 400 状态不允许
+    else 正常确认
+        S->>S: 校验 refund_amount / refund_currency；CNY 必须等于 amount
+        S->>R: saveAndFlush(COMPLETED, SUCCEEDED, reference_type, refunded_at)
+        R-->>S: OK 或 DataIntegrityViolationException
+        S->>I: release(order)
+        S->>DB: order.status=REFUNDED, refund_reference=reference
+        S->>I: reverseRewardPoints(order)
+        S-->>C: 成功
+    end
+
+%% 2) 补记四路径
+
+sequenceDiagram
+    autonumber
+    participant A as 管理员
+    participant S as RefundSettlementService
+    participant R as RefundRequestRepository
+    participant H as 渠道 / 银行
+    participant DB as PostgreSQL
+
+    A->>S: confirm(orderId, cmd)
+    alt B1 已提交后崩溃
+        A->>S: 用同一 reference 重新提交
+        S->>R: findByOrderId
+        R-->>S: PROCESSING/UNKNOWN 且 reference 已填
+        S->>S: 逐字比对 reference
+        S-->>A: 幂等成功（不重复调渠道）
+    else B2 确认前崩溃
+        A->>S: 提供 reference + channel_refund_no 锚点
+        S->>R: findByChannelRefundNo(channelRefundNo)
+        R-->>S: 唯一行
+        S->>S: 校验 orderId 与锚点一致，走 T6
+    else B3 连占位都没有（绕过系统打款）
+        A->>S: confirm(orderId, cmd, selfHeal=true)
+        S->>R: findByOrderId
+        R-->>S: empty
+        S->>S: 硬断言：PAID_REVIEW，或 REFUNDED 且凭证一致
+        alt 订单已 DELIVERED
+            S-->>A: 拒绝（既发货又退款 = 双损）
+        else 断言通过
+            S->>R: 同事务插入 PROCESSING/UNKNOWN + channel_refund_no
+            S->>R: 立即 T6 确认
+        end
+    else B4 纯线下现金 / 银行转账
+        A->>S: confirm(reference_type=OFFLINE_MANUAL, 我方流水号, 核对人)
+        S->>S: 不调渠道、不写 channel_refund_no
+        S->>R: T6 确认，account_source=MANUAL
+    end
+
+%% 3) 对账导入 → 匹配 → 处置
+
+sequenceDiagram
+    autonumber
+    participant A as 财务
+    participant RC as AdminReconciliationController
+    participant IMP as ReconciliationImportService
+    participant M as ReconciliationMatcher
+    participant RS as ReconciliationService
+    participant S as RefundSettlementService
+    participant DB as PostgreSQL
+
+    A->>RC: POST /import (file, channel_code, account_key, period)
+    RC->>IMP: importFile(...)
+    IMP->>IMP: 计算 file_sha256
+    IMP->>DB: insert reconciliation_batches
+    alt 同一文件重复导入
+        IMP-->>A: 返回原有批次（幂等）
+    else 新文件
+        IMP->>DB: insert channel_transactions ON CONFLICT DO NOTHING
+        IMP->>M: match(batchId)
+        loop 每行渠道交易
+            M->>DB: ① external_id 精确匹配
+            M->>DB: ② merchant_ref (=orderId / channel_refund_no)
+            M->>M: ③ (account_key, amount, 时间窗) 仅生成候选
+            M->>DB: insert reconciliation_items(match_status, delayed_times, suspense_until)
+        end
+        IMP-->>A: 差异汇总
+    end
+    A->>RC: POST /items/{id}/resolve
+    RC->>RS: resolve(itemId, action, reason, operatorId, beforeState)
+    RS->>DB: insert reconciliation_resolutions
+    RS->>DB: @LogOperation -> operation_logs（双写）
+    opt 渠道证明退款实际成功而我方为 FAILED/CANCELLED
+        RS->>S: applyChannelTruth -> T7 / T9 翻案
+        S->>DB: result=SUCCEEDED, result_reason, result_updated_by
+    end

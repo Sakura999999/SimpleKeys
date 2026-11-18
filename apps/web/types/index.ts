@@ -143,7 +143,7 @@ export interface Cart {
 // Order
 // ============================================================
 
-export type OrderStatus = 'PENDING' | 'PAID' | 'DELIVERED' | 'EXPIRED' | 'PAID_REVIEW' | 'REFUNDED'
+export type OrderStatus = 'PENDING' | 'PAID' | 'DELIVERED' | 'EXPIRED' | 'CANCELLED' | 'PAID_REVIEW' | 'REFUNDED'
 
 export type OrderType = 'DIRECT' | 'CART'
 
@@ -157,6 +157,17 @@ export interface OrderBrief {
   payment_processing?: boolean
   payment_review_reason?: string
   refund_reference?: string
+  refund_request?: {
+    id: string
+    status: 'PROCESSING' | 'SUCCEEDED'
+    amount: number
+    currency: string
+    payment_amount?: number
+    payment_currency?: string
+    reason: string
+    created_at: string
+    confirmed_at?: string
+  }
   status: OrderStatus
   order_type: OrderType
   payment_method: string
@@ -302,6 +313,32 @@ export interface SiteConfig {
   footer_text?: string
   github_url?: string
   custom_css?: string
+  /** 访客订单找回入口是否开放（后台开关 且 SMTP 已配置） */
+  email_verification_enabled?: boolean
+  /** 验证通过后签发的查单凭证有效期（秒） */
+  email_lookup_grant_ttl_seconds?: number
+  /** 验证码有效期（秒） */
+  email_lookup_code_ttl_seconds?: number
+}
+
+// ============================================================
+// Guest order lookup (邮箱验证码查单)
+// ============================================================
+
+export interface EmailLookupSendResult {
+  /** 下次可重发的等待秒数 */
+  retry_after: number
+}
+
+export interface EmailLookupVerifyResult {
+  /** 查单凭证，放入 sessionStorage，以 X-Order-Lookup-Token 发送 */
+  token: string
+  /** 凭证到期时间（epoch millis） */
+  expires_at: number
+  /** 该邮箱下可访问的访客订单数 */
+  guest_orders: number
+  /** 该邮箱下属于注册账号的订单数，仅用于提示"请登录查看" */
+  registered_orders: number
 }
 
 export interface SiteConfigKV {

@@ -24,6 +24,12 @@ public interface ProductRepository extends JpaRepository<Product, UUID> {
     @Query("select p.id from Product p order by p.id")
     List<UUID> firstIds(Pageable pageable);
 
+    /**
+     * 在售商品（未删除 + 已上架）。低库存看板用，避免把全表取回来再在内存里过滤。
+     */
+    @Query("select p from Product p where p.isDeleted = 0 and p.enabled = true")
+    List<Product> findActiveProducts();
+
     @Query("select p.id from Product p where p.id > :after order by p.id")
     List<UUID> idsAfter(@Param("after") UUID after, Pageable pageable);
 

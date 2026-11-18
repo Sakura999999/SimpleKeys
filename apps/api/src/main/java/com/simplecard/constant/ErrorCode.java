@@ -51,6 +51,12 @@ public final class ErrorCode {
     // ── Security 60001~60099 ──
     public static final int TURNSTILE_FAILED = 60001;
     public static final int DEVICE_RATE_LIMITED = 60002;
+    /** 验证码错误或已失效（刻意不区分「不存在/过期/不匹配」，避免泄露订单存在性） */
+    public static final int EMAIL_CODE_INVALID = 60003;
+    /** 邮箱验证码查单入口未开放（未配置 SMTP 或后台关闭） */
+    public static final int EMAIL_VERIFICATION_UNAVAILABLE = 60004;
+    /** 同一验证码连续试错超限，已被销毁 */
+    public static final int EMAIL_CODE_ATTEMPTS_EXCEEDED = 60005;
 
     // ── Admin 70001~70099 ──
     public static final int CATEGORY_NAME_EXISTS = 70001;

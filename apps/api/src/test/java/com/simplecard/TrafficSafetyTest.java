@@ -50,7 +50,7 @@ class TrafficSafetyTest {
         verifyNoInteractions(verifier);verify(unmatched,never()).save(any());
     }
     @Test void sensitiveGuestAccessDoesNotSilentlyAcceptLegacyMissingSessions() {
-        Order order=pending();OrderAccessGuard guard=new OrderAccessGuard();
+        Order order=pending();OrderAccessGuard guard=new OrderAccessGuard(new com.simplecard.service.OrderLookupGrantStore());
         guard.assertAccess(order,null); // read compatibility: guest UUID remains a capability
         assertThatThrownBy(()->guard.assertSensitiveAccess(order,null)).isInstanceOf(BusinessException.class);
         order.setSessionToken("original");guard.assertSensitiveAccess(order,"original");
@@ -61,7 +61,7 @@ class TrafficSafetyTest {
     private OrderController controller(OrderRepository orders,UnmatchedTransactionRepository unmatched,TxidVerifyService verify,ApiTrafficLimiter limiter) {
         SiteConfigRepository configs=mock(SiteConfigRepository.class);when(configs.findByConfigKey(anyString())).thenReturn(Optional.empty());
         return new OrderController(mock(OrderService.class),mock(InventoryLifecycleService.class),mock(DeliverService.class),orders,
-                unmatched,verify,mock(PaymentService.class),mock(ClientIpResolver.class),new OrderAccessGuard(),limiter,configs);
+                unmatched,verify,mock(PaymentService.class),mock(ClientIpResolver.class),new OrderAccessGuard(new com.simplecard.service.OrderLookupGrantStore()),limiter,configs);
     }
     @Test void onlyConfiguredProxyCanSupplyClientIdentityAndHostnamesAreNeverResolved() {
         ClientIpResolver resolver=new ClientIpResolver();ReflectionTestUtils.setField(resolver,"trustedProxiesConfig","127.0.0.1,172.20.0.1,::1");

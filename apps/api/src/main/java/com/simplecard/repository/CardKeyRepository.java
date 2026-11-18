@@ -31,6 +31,16 @@ public interface CardKeyRepository extends JpaRepository<CardKey, UUID> {
 
     long countByProductIdAndStatus(UUID productId, CardKeyStatus status);
 
+    /**
+     * 按商品分组的库存计数 —— 低库存看板用。
+     *
+     * <p>替代"先取商品列表、再逐个 count"的写法：后者在 1000 个商品时是 1001 次往返，
+     * 这条 SQL 只有 1 次。分组查询天然只返回有卡密的商品，调用方需要按"缺省 0"补齐
+     * （零库存商品同样要出现在低库存列表里）。
+     */
+    @Query("select ck.productId, count(ck) from CardKey ck where ck.status = :status group by ck.productId")
+    List<Object[]> countGroupByProductAndStatus(@Param("status") CardKeyStatus status);
+
     long countByProductIdAndSpecIdAndStatus(UUID productId, UUID specId, CardKeyStatus status);
 
     long countByProductIdAndSpecIdIsNullAndStatus(UUID productId, CardKeyStatus status);

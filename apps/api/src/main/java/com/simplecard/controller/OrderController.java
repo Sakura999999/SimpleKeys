@@ -85,37 +85,53 @@ public class OrderController {
 
     @GetMapping("/{id}/status")
     public ApiResponse<?> getOrderStatus(@PathVariable UUID id,
-            @RequestHeader(value="X-Session-Token",required=false) String sessionToken) {
-        assertOrderAccess(id,sessionToken);
+            @RequestHeader(value="X-Session-Token",required=false) String sessionToken,
+            @RequestHeader(value="X-Order-Lookup-Token",required=false) String lookupToken) {
+        assertOrderAccess(id,sessionToken,lookupToken);
         trafficLimiter.order("status",id,false);
+        return ApiResponse.success(orderService.getOrderStatus(id));
+    }
+
+    @PostMapping("/{id}/cancel")
+    public ApiResponse<?> cancelOrder(@PathVariable UUID id,
+            @RequestHeader(value="X-Session-Token", required=false) String sessionToken) {
+        Order order = orderRepository.findById(id)
+                .orElseThrow(() -> new BusinessException(ErrorCode.ORDER_NOT_FOUND,"订单不存在"));
+        orderAccessGuard.assertSensitiveAccess(order, sessionToken);
+        trafficLimiter.order("cancel", id, false);
+        inventoryLifecycle.cancel(id);
         return ApiResponse.success(orderService.getOrderStatus(id));
     }
 
     @PostMapping("/{id}/refresh")
     public ApiResponse<?> refreshOrderStatus(@PathVariable UUID id,
             @RequestHeader(value="X-Session-Token",required=false) String sessionToken) {
-        assertOrderAccess(id,sessionToken);
+        // 刷新会触发向支付网关的主动查询，属于对外副作用动作，不接受邮箱验证凭证
+        assertOrderAccess(id,sessionToken,null);
         trafficLimiter.order("refresh",id,false);
         return ApiResponse.success(orderService.refreshOrderStatus(id));
     }
 
     @PostMapping("/query")
     public ApiResponse<?> queryOrders(@RequestBody Map<String, Object> request,
-                                      @RequestHeader(value = "X-Session-Token", required = false) String sessionToken) {
-        return ApiResponse.success(deliverService.queryOrders(request, sessionToken));
+                                      @RequestHeader(value = "X-Session-Token", required = false) String sessionToken,
+                                      @RequestHeader(value = "X-Order-Lookup-Token", required = false) String lookupToken) {
+        return ApiResponse.success(deliverService.queryOrders(request, sessionToken, lookupToken));
     }
 
     @PostMapping("/deliver")
     public ApiResponse<?> deliverOrders(@RequestBody Map<String, Object> request,
-                                        @RequestHeader(value = "X-Session-Token", required = false) String sessionToken) {
-        return ApiResponse.success(deliverService.deliverOrders(request, sessionToken));
+                                        @RequestHeader(value = "X-Session-Token", required = false) String sessionToken,
+                                        @RequestHeader(value = "X-Order-Lookup-Token", required = false) String lookupToken) {
+        return ApiResponse.success(deliverService.deliverOrders(request, sessionToken, lookupToken));
     }
 
     @GetMapping("/{id}/export")
     public void exportCardKeys(@PathVariable UUID id,
                                @RequestHeader(value = "X-Session-Token", required = false) String sessionToken,
+                               @RequestHeader(value = "X-Order-Lookup-Token", required = false) String lookupToken,
                                HttpServletResponse response) throws Exception {
-        String content = deliverService.exportCardKeys(id, sessionToken);
+        String content = deliverService.exportCardKeys(id, sessionToken, lookupToken);
         response.setContentType("text/plain; charset=UTF-8");
         response.setHeader("Cache-Control","no-store, private");
         response.setHeader("Pragma","no-cache");
@@ -154,7 +170,7 @@ public class OrderController {
         orderAccessGuard.assertSensitiveAccess(order,sessionToken);
 
         // 2. 校验订单状态为 PENDING 或 EXPIRED
-        if (order.getStatus() != OrderStatus.PENDING && order.getStatus() != OrderStatus.EXPIRED) {
+        if (order.getStatus() != OrderStatus.PENDING && order.getStatus() != OrderStatus.EXPIRED && order.getStatus() != OrderStatus.CANCELLED) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "该订单状态不允许提交 TXID 验证");
         }
 
@@ -202,7 +218,11 @@ public class OrderController {
         }
     }
     private void assertOrderAccess(UUID id,String token) {
+        assertOrderAccess(id,token,null);
+    }
+
+    private void assertOrderAccess(UUID id,String sessionToken,String lookupToken) {
         orderAccessGuard.assertAccess(orderRepository.findById(id)
-                .orElseThrow(()->new BusinessException(ErrorCode.ORDER_NOT_FOUND,"订单不存在")),token);
+                .orElseThrow(()->new BusinessException(ErrorCode.ORDER_NOT_FOUND,"订单不存在")),sessionToken,lookupToken);
     }
 }

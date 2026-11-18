@@ -17,6 +17,8 @@ import java.util.regex.Pattern;
 public class SiteConfigServiceImpl implements SiteConfigService {
 
     private final SiteConfigRepository siteConfigRepository;
+    private final com.simplecard.service.OrderLookupService orderLookupService;
+    private final com.simplecard.config.EmailVerificationProperties lookupProps;
 
     @org.springframework.beans.factory.annotation.Value("${turnstile.site-key:}")
     private String turnstileSiteKey;
@@ -88,6 +90,12 @@ public class SiteConfigServiceImpl implements SiteConfigService {
         if (turnstileEnabled && turnstileSiteKey != null && !turnstileSiteKey.isBlank()) {
             result.put("turnstile_site_key", turnstileSiteKey);
         }
+        // 访客订单找回入口：只有「后台开关打开 且 SMTP 真实可用」才返回 true。
+        // 前端据此关闭入口；直接调用接口时后端也会拒绝（EMAIL_VERIFICATION_UNAVAILABLE），
+        // 两处判断共用 OrderLookupService.isAvailable()，避免前后端状态漂移。
+        result.put("email_verification_enabled", orderLookupService.isAvailable());
+        result.put("email_lookup_grant_ttl_seconds", lookupProps.getGrantTtlSeconds());
+        result.put("email_lookup_code_ttl_seconds", lookupProps.getCodeTtlSeconds());
         return result;
     }
 

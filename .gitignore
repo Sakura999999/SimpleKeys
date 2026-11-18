@@ -50,3 +50,4 @@ uploads/
 
 # Local agent memory; never publish workspace notes.
 .workbuddy/
+.local-logs/

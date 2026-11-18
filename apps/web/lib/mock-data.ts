@@ -474,6 +474,9 @@ export const mockSiteConfig: SiteConfig = {
   points_rate: 100,
   footer_text: "简易发卡 - 自动发卡平台",
   github_url: "https://github.com/runtimepoet/simplecard",
+  // 演示数据里没有邮件服务，邮箱查单入口保持关闭（与真实「未配置 SMTP」时的表现一致）。
+  // 订单号查询不受影响，mock 演示仍然可用。
+  email_verification_enabled: false,
 }
 
 export const mockSiteConfigKVs: SiteConfigKV[] = [
